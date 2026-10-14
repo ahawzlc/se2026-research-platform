@@ -1,0 +1,70 @@
+# ==============================================================================
+# 校园科研项目协作与成果管理平台 —— 本地开发依赖编排
+# ------------------------------------------------------------------------------
+# 用法（在 deploy 目录下执行）：
+#   cp .env.example .env              # 首次
+#   docker compose up -d              # 仅启动 MySQL（日常开发够用）
+#   docker compose --profile full up -d   # 同时启动 Redis
+#   docker compose down               # 停止
+#   docker compose down -v            # 停止并清空数据（重建库时使用）
+#
+# 说明：
+#   - 首次启动会自动执行 mysql/init/ 下的建库脚本；
+#     若数据卷已存在，脚本不会再次执行；
+#   - 表结构变更请修改 mysql/init/ 下的脚本，并 down -v 后重建，
+#     或另写 02-xxx.sql 增量脚本。
+# ==============================================================================
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: se2026-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123456}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-se2026}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      - --lower_case_table_names=0
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: se2026-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - full
+
+volumes:
+  mysql_data:
+    name: se2026-mysql-data
+  redis_data:
+    name: se2026-redis-data

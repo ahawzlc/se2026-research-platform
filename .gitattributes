@@ -1,0 +1,24 @@
+# 统一换行符：仓库内一律 LF，检出时按平台处理
+# 避免 Windows 成员提交 CRLF 导致的全文件 diff 噪音
+* text=auto eol=lf
+
+# 必须保留 CRLF 的脚本
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不参与换行符转换与文本 diff
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.zip binary
+*.jar binary
+
+# 锁文件在合并冲突时不自动解决，避免依赖被悄悄改动
+package-lock.json merge=binary -diff
+pnpm-lock.yaml  merge=binary -diff
