@@ -191,7 +191,7 @@ gh alias set prm 'pr merge --squash --delete-branch'
 本文件的流程（分支 → PR → 评审 → 合并）照样执行，只是**没有服务端强制**，
 误推 `main` 不会被拦截。答辩时可说明"因 GitHub Free 对私有库的限制，采用约定 + PR 流程"。
 
-具备前提后，执行：
+具备前提后，执行（**这是本仓库当前实际生效的配置**）：
 
 ```bash
 gh api -X PUT repos/ahawzlc/se2026-research-platform/branches/main/protection \
@@ -199,11 +199,38 @@ gh api -X PUT repos/ahawzlc/se2026-research-platform/branches/main/protection \
 {
   "required_status_checks": null,
   "enforce_admins": false,
-  "required_pull_request_reviews": { "required_approving_review_count": 1 },
-  "restrictions": null
+  "required_pull_request_reviews": {
+    "dismiss_stale_reviews": false,
+    "require_code_owner_reviews": false,
+    "required_approving_review_count": 1
+  },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
 }
 JSON
 ```
+
+单项调整（不必重发整份配置）：
+
+```bash
+# 例：关闭"新增提交即作废已有批准"
+gh api -X PATCH repos/ahawzlc/se2026-research-platform/branches/main/protection/required_pull_request_reviews \
+  -F dismiss_stale_reviews=false -F required_approving_review_count=1
+```
+
+| 配置项 | 取值 | 说明 |
+| --- | --- | --- |
+| `required_pull_request_reviews` | 开启，1 人批准 | `main` 只能通过 PR 合入 |
+| `dismiss_stale_reviews` | **false** | 关闭。若开启，组员批准后再推一个提交，批准会作废、需重新批准，小组协作过于折腾 |
+| `allow_force_pushes` | false | 禁止强推，防止覆盖他人提交 |
+| `allow_deletions` | false | 禁止删除 `main` |
+| `enforce_admins` | **false** | 管理员不受上述规则约束，便于应急；代价是管理员可直推 `main` |
+
+> **管理员的限制**：开启保护后，管理员**无法批准自己发起的 PR**。
+> 在还没有其他协作者的阶段，只能用管理员权限绕过：
+> `gh pr merge <编号> --merge --admin`，或网页上勾选
+> `Merge without waiting for requirements to be met`。
 
 查看当前保护规则：
 
