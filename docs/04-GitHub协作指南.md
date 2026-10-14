@@ -2,7 +2,8 @@
 
 面向全组的操作手册。前半部分是**每个组员都要做的**，后半部分是**维护者（A 组）才用到的**。
 
-仓库地址：`git@github.com:ahawzlc/se2026-research-platform.git`（私有库）
+仓库地址：`git@github.com:ahawzlc/se2026-research-platform.git`（**公开库**，`main` 已开启分支保护）
+网页地址：https://github.com/ahawzlc/se2026-research-platform
 
 ---
 
@@ -159,13 +160,14 @@ gh alias set prm 'pr merge --squash --delete-branch'
 
 > **前提：仓库必须是公开库，或账号具有 GitHub Pro / Team / Enterprise。**
 >
+> **本仓库当前状态：已设为公开库，`main` 分支保护规则已生效**（无需再申请 Pro）。
 > 依据：GitHub 官方文档「保护分支在 GitHub Free 下仅公开库可用；公开库与私有库均可用需 Pro 及以上」。
 > 已实测：**个人账号下的私有库**调用分支保护与 rulesets 接口，均返回
 > `403 Upgrade to GitHub Pro or make this repository public to enable this feature`。
 >
-> 三条出路，任选其一：
+> 若将来需要**在私有状态下**使用保护规则，走下面方案 A；想把仓库转回私有，见方案 B 的逆向操作。
 
-**方案 A：领 GitHub Pro（在校生免费，推荐）**
+**方案 A：领 GitHub Pro（在校生免费）——若要把仓库转回私有，必须走这条**
 
 1. 先完成上面「添加并验证邮箱」，把清华邮箱挂到账号上；
 2. 打开 https://education.github.com/discount_requests/application 申请；
@@ -179,13 +181,12 @@ gh alias set prm 'pr merge --squash --delete-branch'
 > 则必须 Organization 自身有 Team/Enterprise（或由任课教师申请 GitHub Education for teachers
 > 免费获得 Team），所以**不要把仓库转移到 organization**。
 
-**方案 B：临时把仓库转为公开**
+**方案 B：切换仓库可见性**
 
-Settings → General → 拉到最下方 Danger Zone → `Change visibility` → `Change to public`。
-保护规则**立即免费可用**。注意转为公开期间，代码与全部历史提交都会被公网可见；
-仓库内目前没有敏感信息（`.env` 已忽略，未入库），但仍建议期末再转回私有。
+- 转公开：Settings → General → 最下方 Danger Zone → `Change visibility` → `Change to public`（当前状态）；
+- 转私有：同处选 `Change to private`，**但私有后保护规则会失效**，需先具备 Pro 才谈得上继续用。
 
-**方案 C：暂不启用，先用约定约束**
+**方案 C：暂不启用，先用约定约束**（当前未采用）
 
 本文件的流程（分支 → PR → 评审 → 合并）照样执行，只是**没有服务端强制**，
 误推 `main` 不会被拦截。答辩时可说明"因 GitHub Free 对私有库的限制，采用约定 + PR 流程"。
