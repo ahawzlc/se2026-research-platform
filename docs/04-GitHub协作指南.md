@@ -55,7 +55,37 @@ git config --global user.email "你的邮箱"
 > 邮箱必须是你 GitHub 账号里已添加并验证的邮箱，否则提交不会关联到你的头像与贡献图。
 > 本项目 A 组使用的邮箱是 `wangzl24@mails.tsinghua.edu.cn`。
 
-### 4. 网络不通时（本机组情况）
+### 4. 添加并验证邮箱（提交才会关联到你的账号）
+
+提交里的邮箱必须**同时**是 GitHub 账号里已添加**且已验证**的邮箱，否则提交能推上去，但不算你的（头像、贡献图空白）。
+
+**网页操作（推荐，最快）**
+
+1. 打开 https://github.com/settings/emails
+2. `Add email address` → 填 `wangzl24@mails.tsinghua.edu.cn` → `Add`
+3. 到清华邮箱（https://mails.tsinghua.edu.cn）收 GitHub 的验证邮件 → 点 `Verify email address`
+4. 验证通过后，在该邮箱右侧下拉里可设为 **Primary**
+
+**命令行操作（需先给 gh 补 `user` 权限）**
+
+```bash
+gh auth refresh -h github.com -s user      # 会再走一次设备码授权
+gh api --method POST -H "Accept: application/vnd.github+json" \
+  /user/emails -f "emails[]=wangzl24@mails.tsinghua.edu.cn"
+# 查看结果
+gh api /user/emails --jq '.[] | {email, primary, verified, visibility}'
+```
+
+> 命令行只能完成"添加"，**验证那一步无论如何都要去邮箱点链接**。
+
+**容易踩的坑**：Settings → Emails 里有一项 `Block command line pushes that expose my email`
+（阻止暴露邮箱的命令行推送）。**若勾选，用真实邮箱提交的 push 会被服务端拒绝**（报 `GH007`）。两种解法：
+
+1. 这一项**不要勾**；
+2. 想隐藏真实邮箱又要关联账号，就把提交邮箱改成 GitHub 提供的
+   `<数字ID>+<用户名>@users.noreply.github.com`（具体地址在 Settings → Emails 页面可见）。
+
+### 5. 网络不通时（本机组情况）
 
 部分网络下 `github.com:22` 会被拒。已在 `~/.ssh/config` 配置走 443 通道：
 
@@ -127,15 +157,38 @@ gh alias set prm 'pr merge --squash --delete-branch'
 
 ### 1. 设置 main 分支保护
 
-> **前提：仓库必须是公开库，或账号具有 GitHub Pro。**
-> 已实测：**个人账号下的私有库**调用分支保护 / rulesets 接口会返回
-> `403 Upgrade to GitHub Pro or make this repository public to enable this feature`。
-> 三条出路，任选其一：
+> **前提：仓库必须是公开库，或账号具有 GitHub Pro / Team / Enterprise。**
 >
-> 1. **领 GitHub Pro（推荐，免费）**：在校生用学校邮箱申请 GitHub Student Developer Pack，
->    通过后个人账号即含 Pro，私有库保护自动解锁。
-> 2. **期末把仓库转为公开**（Settings → General → 最下方 Change visibility），保护即免费可用。
-> 3. **先不改**：靠本文件的约定 + PR 流程约束，代码评审照样走，只是没有服务端强制。
+> 依据：GitHub 官方文档「保护分支在 GitHub Free 下仅公开库可用；公开库与私有库均可用需 Pro 及以上」。
+> 已实测：**个人账号下的私有库**调用分支保护与 rulesets 接口，均返回
+> `403 Upgrade to GitHub Pro or make this repository public to enable this feature`。
+>
+> 三条出路，任选其一：
+
+**方案 A：领 GitHub Pro（在校生免费，推荐）**
+
+1. 先完成上面「添加并验证邮箱」，把清华邮箱挂到账号上；
+2. 打开 https://education.github.com/discount_requests/application 申请；
+3. 身份选 `Student`，学校填 `Tsinghua University`，填学制与预计毕业时间；
+   认证方式二选一：① 用学校邮箱（`@mails.tsinghua.edu.cn`，通常可直接通过）；
+   ② 上传在读证明 / 学生证（**需含姓名与当前日期**）；
+4. 审核一般需数天，通过后个人账号即变为 Pro，私有库的分支保护、CODEOWNERS 等随即可用；
+5. 通过后回来找我（或自己跑下面的命令）设置保护规则。
+
+> **关键限制**：个人 Pro 只对**个人账号名下的仓库**生效。若把仓库挪到 GitHub Organization，
+> 则必须 Organization 自身有 Team/Enterprise（或由任课教师申请 GitHub Education for teachers
+> 免费获得 Team），所以**不要把仓库转移到 organization**。
+
+**方案 B：临时把仓库转为公开**
+
+Settings → General → 拉到最下方 Danger Zone → `Change visibility` → `Change to public`。
+保护规则**立即免费可用**。注意转为公开期间，代码与全部历史提交都会被公网可见；
+仓库内目前没有敏感信息（`.env` 已忽略，未入库），但仍建议期末再转回私有。
+
+**方案 C：暂不启用，先用约定约束**
+
+本文件的流程（分支 → PR → 评审 → 合并）照样执行，只是**没有服务端强制**，
+误推 `main` 不会被拦截。答辩时可说明"因 GitHub Free 对私有库的限制，采用约定 + PR 流程"。
 
 具备前提后，执行：
 
@@ -156,6 +209,10 @@ JSON
 ```bash
 gh api repos/ahawzlc/se2026-research-platform/branches/main/protection
 ```
+
+网页等价操作：Settings → Branches → `Add branch protection rule` → Branch name pattern 填 `main`
+→ 勾 `Require a pull request before merging` → `Required approvals` 设 1 → Create。
+（`enforce_admins: false` 的含义是：规则默认不约束仓库管理员，管理员仍可直接推送，便于应急。）
 
 ### 2. 邀请协作者
 
