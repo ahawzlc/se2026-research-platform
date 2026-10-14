@@ -127,6 +127,18 @@ gh alias set prm 'pr merge --squash --delete-branch'
 
 ### 1. 设置 main 分支保护
 
+> **前提：仓库必须是公开库，或账号具有 GitHub Pro。**
+> 已实测：**个人账号下的私有库**调用分支保护 / rulesets 接口会返回
+> `403 Upgrade to GitHub Pro or make this repository public to enable this feature`。
+> 三条出路，任选其一：
+>
+> 1. **领 GitHub Pro（推荐，免费）**：在校生用学校邮箱申请 GitHub Student Developer Pack，
+>    通过后个人账号即含 Pro，私有库保护自动解锁。
+> 2. **期末把仓库转为公开**（Settings → General → 最下方 Change visibility），保护即免费可用。
+> 3. **先不改**：靠本文件的约定 + PR 流程约束，代码评审照样走，只是没有服务端强制。
+
+具备前提后，执行：
+
 ```bash
 gh api -X PUT repos/ahawzlc/se2026-research-platform/branches/main/protection \
   --input - <<'JSON'
