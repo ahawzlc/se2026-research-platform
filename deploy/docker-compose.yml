@@ -3,8 +3,9 @@
 # ------------------------------------------------------------------------------
 # 用法（在 deploy 目录下执行）：
 #   cp .env.example .env              # 首次
-#   docker compose up -d              # 仅启动 MySQL（日常开发够用）
+#   docker compose up -d              # 仅启动 MySQL（日常开发够用，后端本机 npm run start:dev）
 #   docker compose --profile full up -d   # 同时启动 Redis
+#   docker compose --profile app up -d --build   # 把后端也跑进容器（需先构建镜像）
 #   docker compose down               # 停止
 #   docker compose down -v            # 停止并清空数据（重建库时使用）
 #
@@ -23,11 +24,17 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123456}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-se2026}
-      TZ: Asia/Shanghai
+      # 应用专用账号（避免后端直接用 root 连接）
+      MYSQL_USER: ${MYSQL_USER:-se2026}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-se2026_pwd}
+      TZ: UTC
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
-      - --default-time-zone=+08:00
+      # 统一按 UTC 存储：Prisma 读取 MySQL 的 DATETIME 时一律按 UTC 解释，
+      # 若这里设成 +08:00，接口返回的时间会整体差 8 小时（踩坑记录见 docs/06）。
+      # 对外展示由后端 formatDateTime() 转成北京时间（backend/src/common/datetime.ts）。
+      - --default-time-zone=+00:00
       - --lower_case_table_names=0
     ports:
       - "${MYSQL_PORT:-3306}:3306"
@@ -62,6 +69,31 @@ services:
       retries: 5
     profiles:
       - full
+
+  # 后端服务（可选）：默认不启动，日常开发建议本机 npm run start:dev，热重载更快
+  backend:
+    build:
+      # 构建上下文为仓库根目录：Dockerfile 内 COPY 路径以 backend/ 开头
+      context: ..
+      dockerfile: backend/Dockerfile
+    container_name: se2026-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      APP_PORT: 8080
+      # 容器内访问数据库用服务名 mysql，不是 localhost
+      DATABASE_URL: mysql://${MYSQL_USER:-se2026}:${MYSQL_PASSWORD:-se2026_pwd}@mysql:3306/${MYSQL_DATABASE:-se2026}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_EXPIRES_IN_SECONDS: ${JWT_EXPIRES_IN_SECONDS:-604800}
+      APP_ENABLE_DEV_TOKEN: "false"
+      TZ: Asia/Shanghai
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    profiles:
+      - app
 
 volumes:
   mysql_data:

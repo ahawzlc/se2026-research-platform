@@ -22,7 +22,8 @@ export interface PageQuery {
 }
 
 export interface UserInfo {
-  id: number
+  /** 后端为 BIGINT 主键，序列化后是字符串，勿当数字用 */
+  id: string
   username: string
   nickname: string
   avatar: string
@@ -47,10 +48,12 @@ export interface RegisterPayload {
 }
 
 export interface FileItem {
-  id: number
+  /** 后端为 BIGINT 主键，序列化后是字符串，勿当数字用 */
+  id: string
   originalName: string
   url: string
-  size: number
+  /** 字节数，后端 BIGINT 序列化后为字符串 */
+  size: string
   mimeType: string
   createdAt: string
 }
