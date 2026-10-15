@@ -1,0 +1,402 @@
+// ==============================================================================
+// 校园科研项目协作与成果管理平台 —— Prisma 数据模型
+// ------------------------------------------------------------------------------
+// 口径来源：deploy/mysql/init/01-schema.sql 与 docs/02-数据字典.md
+// 表数量：18（账号 3 + 支撑 1 + 业务 10 + 沟通 3 + 统计 1）
+//
+// 【重要约定，组内必读】
+//   1. 建表以 deploy/mysql/init/01-schema.sql 为准；本文件只做映射，不改结构。
+//   2. 禁止执行 `prisma migrate dev` 与 `prisma db push`：它们会按本模型重建/改动
+//      表结构，与既有 DDL 冲突。
+//   3. 数据库层【不使用外键】，本文件里的 relation 只是 Prisma 的逻辑关系，
+//      用于支持 `include` 联表查询，不会在库里生成外键约束。
+//      → 因此【不要】用 `prisma db pull` 覆盖本文件，反向生成看不到逻辑关系。
+//   4. 字段命名：TypeScript 侧用 camelCase，数据库侧用 snake_case（@map / @@map）。
+//   5. 所有表都有 `deleted` 逻辑删除标记（0 正常 / 1 已删除），
+//      业务查询必须显式带 `deleted: 0`——Prisma 不会自动过滤。
+//   6. activity_log 只增不改：无 updated_at、无 deleted。
+// ==============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ==============================================================================
+// 一、账号类
+// ==============================================================================
+
+/// 用户
+model User {
+  id           BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  username     String   @unique(map: "uk_user_username") @db.VarChar(50)
+  passwordHash String   @map("password_hash") @db.VarChar(100)
+  nickname     String   @default("") @db.VarChar(50)
+  avatar       String   @default("") @db.VarChar(255)
+  email        String   @default("") @db.VarChar(100)
+  createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted      Int      @default(0) @db.UnsignedTinyInt
+
+  ownedTeams        Team[]              @relation("TeamOwner")
+  teamMemberships   TeamMember[]
+  projectMemberships ProjectMember[]
+  assignedTasks     Task[]              @relation("TaskAssignee")
+  uploadedFiles     File[]              @relation("FileUploader")
+  uploadedLiterature Literature[]       @relation("LiteratureUploader")
+  meetingAttendances MeetingAttendee[]
+  achievementMembers AchievementMember[]
+  conversationMembers ConversationMember[]
+  sentMessages      Message[]           @relation("MessageSender")
+  activityLogs      ActivityLog[]
+
+  @@index([email], map: "idx_user_email")
+  @@map("user")
+}
+
+/// 课题组
+model Team {
+  id          BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  name        String   @db.VarChar(100)
+  description String   @default("") @db.VarChar(500)
+  inviteCode  String   @unique(map: "uk_team_invite_code") @map("invite_code") @db.VarChar(16)
+  ownerId     BigInt   @map("owner_id") @db.UnsignedBigInt
+  createdAt   DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted     Int      @default(0) @db.UnsignedTinyInt
+
+  owner       User         @relation("TeamOwner", fields: [ownerId], references: [id])
+  members     TeamMember[]
+  projects    Project[]
+  literature  Literature[]
+  activityLogs ActivityLog[]
+
+  @@index([ownerId], map: "idx_team_owner")
+  @@map("team")
+}
+
+/// 课题组成员；role: owner / admin / member
+model TeamMember {
+  id        BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  teamId    BigInt   @map("team_id") @db.UnsignedBigInt
+  userId    BigInt   @map("user_id") @db.UnsignedBigInt
+  role      String   @default("member") @db.VarChar(20)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted   Int      @default(0) @db.UnsignedTinyInt
+
+  team Team @relation(fields: [teamId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([teamId, userId], map: "uk_team_member")
+  @@index([userId], map: "idx_team_member_user")
+  @@map("team_member")
+}
+
+// ==============================================================================
+// 二、支撑类（补充表：literature / achievement 的 file_id 需要有落点）
+// ==============================================================================
+
+/// 上传文件
+model File {
+  id           BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  uploaderId   BigInt   @map("uploader_id") @db.UnsignedBigInt
+  originalName String   @map("original_name") @db.VarChar(255)
+  storedPath   String   @map("stored_path") @db.VarChar(500)
+  url          String?  @db.VarChar(500)
+  size         BigInt   @default(0) @db.UnsignedBigInt
+  mimeType     String?  @map("mime_type") @db.VarChar(100)
+  createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  deleted      Int      @default(0) @db.UnsignedTinyInt
+
+  uploader    User          @relation("FileUploader", fields: [uploaderId], references: [id])
+  literature  Literature[]
+  achievements Achievement[]
+
+  @@index([uploaderId], map: "idx_file_uploader")
+  @@map("file")
+}
+
+// ==============================================================================
+// 三、业务类
+// ==============================================================================
+
+/// 项目；status: planning / active / finished / archived
+model Project {
+  id          BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  teamId      BigInt    @map("team_id") @db.UnsignedBigInt
+  name        String    @db.VarChar(100)
+  description String    @default("") @db.VarChar(500)
+  status      String    @default("planning") @db.VarChar(20)
+  startDate   DateTime? @map("start_date") @db.Date
+  endDate     DateTime? @map("end_date") @db.Date
+  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted     Int       @default(0) @db.UnsignedTinyInt
+
+  team         Team              @relation(fields: [teamId], references: [id])
+  members      ProjectMember[]
+  milestones   Milestone[]
+  tasks        Task[]
+  literature   Literature[]
+  meetings     Meeting[]
+  achievements Achievement[]
+
+  @@index([teamId], map: "idx_project_team")
+  @@map("project")
+}
+
+/// 项目成员
+model ProjectMember {
+  id        BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  projectId BigInt   @map("project_id") @db.UnsignedBigInt
+  userId    BigInt   @map("user_id") @db.UnsignedBigInt
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted   Int      @default(0) @db.UnsignedTinyInt
+
+  project Project @relation(fields: [projectId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([projectId, userId], map: "uk_project_member")
+  @@map("project_member")
+}
+
+/// 里程碑；status: pending / done
+model Milestone {
+  id        BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  projectId BigInt    @map("project_id") @db.UnsignedBigInt
+  name      String    @db.VarChar(100)
+  dueDate   DateTime? @map("due_date") @db.Date
+  status    String    @default("pending") @db.VarChar(20)
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted   Int       @default(0) @db.UnsignedTinyInt
+
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@index([projectId], map: "idx_milestone_project")
+  @@map("milestone")
+}
+
+/// 任务（看板）；status: todo / doing / done，priority: low / medium / high
+model Task {
+  id          BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  projectId   BigInt    @map("project_id") @db.UnsignedBigInt
+  title       String    @db.VarChar(200)
+  description String?   @db.Text
+  assigneeId  BigInt?   @map("assignee_id") @db.UnsignedBigInt
+  status      String    @default("todo") @db.VarChar(20)
+  priority    String    @default("medium") @db.VarChar(10)
+  dueDate     DateTime? @map("due_date") @db.Date
+  sortOrder   Int       @default(0) @map("sort_order")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted     Int       @default(0) @db.UnsignedTinyInt
+
+  project  Project @relation(fields: [projectId], references: [id])
+  assignee User?   @relation("TaskAssignee", fields: [assigneeId], references: [id])
+
+  @@index([projectId, status, sortOrder], map: "idx_task_project_status")
+  @@index([assigneeId], map: "idx_task_assignee")
+  @@map("task")
+}
+
+/// 文献；read_status: unread / reading / read
+model Literature {
+  id         BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  teamId     BigInt   @map("team_id") @db.UnsignedBigInt
+  projectId  BigInt?  @map("project_id") @db.UnsignedBigInt
+  title      String   @db.VarChar(300)
+  sourceUrl  String?  @map("source_url") @db.VarChar(500)
+  fileId     BigInt?  @map("file_id") @db.UnsignedBigInt
+  readStatus String   @default("unread") @map("read_status") @db.VarChar(20)
+  uploaderId BigInt   @map("uploader_id") @db.UnsignedBigInt
+  createdAt  DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted    Int      @default(0) @db.UnsignedTinyInt
+
+  team     Team            @relation(fields: [teamId], references: [id])
+  project  Project?        @relation(fields: [projectId], references: [id])
+  file     File?           @relation(fields: [fileId], references: [id])
+  uploader User            @relation("LiteratureUploader", fields: [uploaderId], references: [id])
+  tags     LiteratureTag[]
+
+  @@index([teamId], map: "idx_literature_team")
+  @@index([uploaderId], map: "idx_literature_uploader")
+  @@map("literature")
+}
+
+/// 文献标签（无 updated_at）
+model LiteratureTag {
+  id           BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  literatureId BigInt   @map("literature_id") @db.UnsignedBigInt
+  tag          String   @db.VarChar(50)
+  createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  deleted      Int      @default(0) @db.UnsignedTinyInt
+
+  literature Literature @relation(fields: [literatureId], references: [id])
+
+  @@unique([literatureId, tag], map: "uk_literature_tag")
+  @@map("literature_tag")
+}
+
+/// 会议记录
+model Meeting {
+  id        BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  projectId BigInt    @map("project_id") @db.UnsignedBigInt
+  title     String    @db.VarChar(200)
+  heldAt    DateTime? @map("held_at") @db.DateTime(0)
+  location  String?   @db.VarChar(200)
+  content   String?   @db.LongText
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted   Int       @default(0) @db.UnsignedTinyInt
+
+  project   Project           @relation(fields: [projectId], references: [id])
+  attendees MeetingAttendee[]
+
+  @@index([projectId, heldAt], map: "idx_meeting_project")
+  @@map("meeting")
+}
+
+/// 参会人（无 updated_at）
+model MeetingAttendee {
+  id        BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  meetingId BigInt   @map("meeting_id") @db.UnsignedBigInt
+  userId    BigInt   @map("user_id") @db.UnsignedBigInt
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  deleted   Int      @default(0) @db.UnsignedTinyInt
+
+  meeting Meeting @relation(fields: [meetingId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([meetingId, userId], map: "uk_meeting_attendee")
+  @@map("meeting_attendee")
+}
+
+/// 成果；type: paper / patent / software / award / other
+model Achievement {
+  id          BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  projectId   BigInt   @map("project_id") @db.UnsignedBigInt
+  type        String   @db.VarChar(30)
+  title       String   @db.VarChar(300)
+  description String?  @db.Text
+  fileId      BigInt?  @map("file_id") @db.UnsignedBigInt
+  createdAt   DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted     Int      @default(0) @db.UnsignedTinyInt
+
+  project Project             @relation(fields: [projectId], references: [id])
+  file    File?               @relation(fields: [fileId], references: [id])
+  members AchievementMember[]
+
+  @@index([projectId], map: "idx_achievement_project")
+  @@map("achievement")
+}
+
+/// 成果成员关联；contribution_note 仅展示用，不参与任何计算
+model AchievementMember {
+  id               BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  achievementId    BigInt   @map("achievement_id") @db.UnsignedBigInt
+  userId           BigInt   @map("user_id") @db.UnsignedBigInt
+  contributionNote String?  @map("contribution_note") @db.VarChar(255)
+  createdAt        DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt        DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted          Int      @default(0) @db.UnsignedTinyInt
+
+  achievement Achievement @relation(fields: [achievementId], references: [id])
+  user        User        @relation(fields: [userId], references: [id])
+
+  @@unique([achievementId, userId], map: "uk_achievement_member")
+  @@map("achievement_member")
+}
+
+// ==============================================================================
+// 四、沟通类（统一会话模型：评论 / 讨论区 / 私信共用）
+// ==============================================================================
+
+/// 会话；type: comment（上下文评论）/ group（项目讨论区）/ private（私信，不计入统计）
+model Conversation {
+  id        BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  type      String   @db.VarChar(20)
+  refType   String?  @map("ref_type") @db.VarChar(30)
+  refId     BigInt?  @map("ref_id") @db.UnsignedBigInt
+  title     String?  @db.VarChar(200)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted   Int      @default(0) @db.UnsignedTinyInt
+
+  members  ConversationMember[]
+  messages Message[]
+
+  @@index([refType, refId], map: "idx_conversation_ref")
+  @@map("conversation")
+}
+
+/// 会话成员与已读位点；last_read_at 是未读数计算的唯一依据
+model ConversationMember {
+  id             BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  conversationId BigInt    @map("conversation_id") @db.UnsignedBigInt
+  userId         BigInt    @map("user_id") @db.UnsignedBigInt
+  lastReadAt     DateTime? @map("last_read_at") @db.DateTime(0)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted        Int       @default(0) @db.UnsignedTinyInt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@unique([conversationId, userId], map: "uk_conversation_member")
+  @@index([userId], map: "idx_cm_user")
+  @@map("conversation_member")
+}
+
+/// 消息（无 updated_at）；msg_type: text / file / system
+model Message {
+  id             BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  conversationId BigInt   @map("conversation_id") @db.UnsignedBigInt
+  senderId       BigInt   @map("sender_id") @db.UnsignedBigInt
+  content        String?  @db.Text
+  msgType        String   @default("text") @map("msg_type") @db.VarChar(20)
+  refType        String?  @map("ref_type") @db.VarChar(30)
+  refId          BigInt?  @map("ref_id") @db.UnsignedBigInt
+  createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  deleted        Int      @default(0) @db.UnsignedTinyInt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+  sender       User         @relation("MessageSender", fields: [senderId], references: [id])
+
+  @@index([conversationId, id], map: "idx_message_conversation")
+  @@map("message")
+}
+
+// ==============================================================================
+// 五、统计类（贡献度分析的唯一数据来源，只增不改）
+// ==============================================================================
+
+/// 行为埋点流水；type 取值见 docs/03-贡献度口径说明.md
+/// 注意：本表没有 updated_at 与 deleted，写入后不得修改或删除
+model ActivityLog {
+  id        BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  userId    BigInt   @map("user_id") @db.UnsignedBigInt
+  teamId    BigInt   @map("team_id") @db.UnsignedBigInt
+  type      String   @db.VarChar(40)
+  refType   String?  @map("ref_type") @db.VarChar(30)
+  refId     BigInt?  @map("ref_id") @db.UnsignedBigInt
+  weight    Decimal  @default(1.00) @db.Decimal(5, 2)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(0)
+
+  user User @relation(fields: [userId], references: [id])
+  team Team @relation(fields: [teamId], references: [id])
+
+  @@index([teamId, userId, createdAt], map: "idx_log_team_user_time")
+  @@index([teamId, type], map: "idx_log_team_type")
+  @@index([userId, createdAt], map: "idx_log_user_time")
+  @@index([type, refType, refId], map: "idx_log_ref")
+  @@map("activity_log")
+}
