@@ -54,7 +54,6 @@ git config --global user.email "你的邮箱"
 ```
 
 > 邮箱必须是你 GitHub 账号里已添加并验证的邮箱，否则提交不会关联到你的头像与贡献图。
-> 本项目 A 组使用的邮箱是 `wangzl24@mails.tsinghua.edu.cn`。
 
 ### 4. 添加并验证邮箱（提交才会关联到你的账号）
 
@@ -63,8 +62,8 @@ git config --global user.email "你的邮箱"
 **网页操作（推荐，最快）**
 
 1. 打开 https://github.com/settings/emails
-2. `Add email address` → 填 `wangzl24@mails.tsinghua.edu.cn` → `Add`
-3. 到清华邮箱（https://mails.tsinghua.edu.cn）收 GitHub 的验证邮件 → 点 `Verify email address`
+2. `Add email address` → 填**你自己的邮箱**（想关联到 GitHub 账号的那个）→ `Add`
+3. 到该邮箱收 GitHub 的验证邮件 → 点 `Verify email address`
 4. 验证通过后，在该邮箱右侧下拉里可设为 **Primary**
 
 **命令行操作（需先给 gh 补 `user` 权限）**
@@ -72,7 +71,7 @@ git config --global user.email "你的邮箱"
 ```bash
 gh auth refresh -h github.com -s user      # 会再走一次设备码授权
 gh api --method POST -H "Accept: application/vnd.github+json" \
-  /user/emails -f "emails[]=wangzl24@mails.tsinghua.edu.cn"
+  /user/emails -f "emails[]=<你的邮箱>"
 # 查看结果
 gh api /user/emails --jq '.[] | {email, primary, verified, visibility}'
 ```
@@ -158,40 +157,12 @@ gh alias set prm 'pr merge --squash --delete-branch'
 
 ### 1. 设置 main 分支保护
 
-> **前提：仓库必须是公开库，或账号具有 GitHub Pro / Team / Enterprise。**
->
-> **本仓库当前状态：已设为公开库，`main` 分支保护规则已生效**（无需再申请 Pro）。
-> 依据：GitHub 官方文档「保护分支在 GitHub Free 下仅公开库可用；公开库与私有库均可用需 Pro 及以上」。
-> 已实测：**个人账号下的私有库**调用分支保护与 rulesets 接口，均返回
-> `403 Upgrade to GitHub Pro or make this repository public to enable this feature`。
->
-> 若将来需要**在私有状态下**使用保护规则，走下面方案 A；想把仓库转回私有，见方案 B 的逆向操作。
+> **当前状态：仓库为公开库，`main` 分支保护规则已生效**。
+> 依据：GitHub Free 下分支保护仅对**公开库**开放，私有库需 GitHub Pro 及以上。
+> 若将来要把仓库转回私有并保留保护规则，需先申请 GitHub Education 的 Pro（在校生免费），
+> 再按下方「当前生效配置」重新设置。
 
-**方案 A：领 GitHub Pro（在校生免费）——若要把仓库转回私有，必须走这条**
-
-1. 先完成上面「添加并验证邮箱」，把清华邮箱挂到账号上；
-2. 打开 https://education.github.com/discount_requests/application 申请；
-3. 身份选 `Student`，学校填 `Tsinghua University`，填学制与预计毕业时间；
-   认证方式二选一：① 用学校邮箱（`@mails.tsinghua.edu.cn`，通常可直接通过）；
-   ② 上传在读证明 / 学生证（**需含姓名与当前日期**）；
-4. 审核一般需数天，通过后个人账号即变为 Pro，私有库的分支保护、CODEOWNERS 等随即可用；
-5. 通过后回来找我（或自己跑下面的命令）设置保护规则。
-
-> **关键限制**：个人 Pro 只对**个人账号名下的仓库**生效。若把仓库挪到 GitHub Organization，
-> 则必须 Organization 自身有 Team/Enterprise（或由任课教师申请 GitHub Education for teachers
-> 免费获得 Team），所以**不要把仓库转移到 organization**。
-
-**方案 B：切换仓库可见性**
-
-- 转公开：Settings → General → 最下方 Danger Zone → `Change visibility` → `Change to public`（当前状态）；
-- 转私有：同处选 `Change to private`，**但私有后保护规则会失效**，需先具备 Pro 才谈得上继续用。
-
-**方案 C：暂不启用，先用约定约束**（当前未采用）
-
-本文件的流程（分支 → PR → 评审 → 合并）照样执行，只是**没有服务端强制**，
-误推 `main` 不会被拦截。答辩时可说明"因 GitHub Free 对私有库的限制，采用约定 + PR 流程"。
-
-具备前提后，执行（**这是本仓库当前实际生效的配置**）：
+当前实际生效的配置：
 
 ```bash
 gh api -X PUT repos/ahawzlc/se2026-research-platform/branches/main/protection \
@@ -231,6 +202,9 @@ gh api -X PATCH repos/ahawzlc/se2026-research-platform/branches/main/protection/
 > 在还没有其他协作者的阶段，只能用管理员权限绕过：
 > `gh pr merge <编号> --merge --admin`，或网页上勾选
 > `Merge without waiting for requirements to be met`。
+>
+> **`develop` 合入 `main` 的合并策略**：长期分支 `develop` 合入 `main` 用 **merge commit**
+> （`gh pr merge --merge`），**不要 squash、不要删 `develop` 分支**——否则两边历史分叉，后续 PR 会反复冲突。
 
 查看当前保护规则：
 
