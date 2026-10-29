@@ -1,0 +1,83 @@
+# ==============================================================================
+# 自动部署：develop 分支推送后，把代码传到组服务器并重建容器
+# ------------------------------------------------------------------------------
+# 前提（一次性配置，见 docs/07-上线运维手册.md 第三节）：
+#   在 GitHub 仓库 Settings → Secrets and variables → Actions 中添加：
+#     DEPLOY_HOST         82.156.156.94
+#     DEPLOY_PORT         22
+#     DEPLOY_USER         ubuntu
+#     DEPLOY_SSH_KEY      部署专用私钥（ed25519，公钥已加入服务器 authorized_keys）
+#     DEPLOY_KNOWN_HOSTS  ssh-keyscan 得到的服务器 host key（防中间人）
+#
+# 说明：
+#   - 构建不在 runner 上做，只上传源码，镜像在服务器构建（避免重复拉 1GB 依赖）
+#   - deploy/.env.prod 不入库，也不在压缩包内，服务器上的密钥永远不会被覆盖
+#   - 同一时刻只允许一个部署任务，避免并发构建打架
+# ==============================================================================
+
+name: deploy
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: 部署到组服务器
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 打包部署产物
+        run: |
+          tar -czf "$RUNNER_TEMP/release.tgz" \
+            --exclude='.git' \
+            backend frontend deploy
+          ls -lh "$RUNNER_TEMP/release.tgz"
+
+      - name: 配置 SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: 上传产物
+        run: |
+          scp -P "${{ secrets.DEPLOY_PORT }}" \
+            "$RUNNER_TEMP/release.tgz" \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/tmp/release.tgz"
+
+      - name: 解压并部署
+        run: |
+          ssh -p "${{ secrets.DEPLOY_PORT }}" \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          echo "==> 解压到 /opt/se2026"
+          tar -xzf /tmp/release.tgz -C /opt/se2026
+          chmod +x /opt/se2026/deploy/scripts/*.sh
+          echo "==> 执行部署脚本"
+          APP_DIR=/opt/se2026 /opt/se2026/deploy/scripts/deploy.sh
+          REMOTE
+
+      - name: 公网健康检查
+        run: |
+          for i in $(seq 1 6); do
+            if curl -sf --max-time 5 "http://${{ secrets.DEPLOY_HOST }}/api/v1/health"; then
+              echo ""
+              echo "公网访问正常"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "公网健康检查失败，请查看服务器容器日志"
+          exit 1
