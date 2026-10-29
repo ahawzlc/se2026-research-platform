@@ -1,0 +1,124 @@
+# ==============================================================================
+# 生产 / 演示环境编排（单机 Docker Compose）
+# ------------------------------------------------------------------------------
+# 与 docker-compose.yml 的区别：
+#   1. 本文件是「完整应用」编排：MySQL + 后端 + 前端(Nginx) 三个服务；
+#   2. 只有 web 映射宿主机 80，MySQL 与后端**不对外暴露端口**，
+#      数据库只能经容器网络访问（公网直连 3306 是常见被扫/被拖库入口）；
+#   3. 数据卷与开发环境分开命名（se2026-prod-*），互不干扰。
+#
+# 用法（在服务器 /opt/se2026/deploy 下执行）：
+#   cp .env.prod.example .env.prod && vi .env.prod   # 首次，填真实密码
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod ps
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f backend
+#
+# 表结构变更：mysql/init/*.sql 只在**数据卷为空时**执行一次。
+#   开发期直接改 01-schema.sql 后 down -v 重建；上线后有数据则手工执行增量 SQL。
+# ==============================================================================
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: se2026-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env.prod 中设置}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-se2026}
+      MYSQL_USER: ${MYSQL_USER:-se2026}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env.prod 中设置}
+      TZ: UTC
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # 统一按 UTC 存储：Prisma 按 UTC 解释 DATETIME，改这里会让接口时间整体偏移
+      - --default-time-zone=+00:00
+      - --lower_case_table_names=0
+      # 2C4G 小机器上限制连接数与缓冲池，避免 MySQL 抢光内存导致后端 OOM
+      - --max-connections=100
+      - --innodb-buffer-pool-size=256M
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - se2026
+    healthcheck:
+      # 走 TCP 而非 socket：初始化期的临时实例也会应答 socket，会导致后端过早启动
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  backend:
+    build:
+      # 构建上下文为仓库根目录：Dockerfile 内 COPY 路径以 backend/ 开头
+      context: ..
+      dockerfile: backend/Dockerfile
+    image: se2026-backend:latest
+    container_name: se2026-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      APP_PORT: 8080
+      # 容器内访问数据库用服务名 mysql，不是 localhost
+      DATABASE_URL: mysql://${MYSQL_USER:-se2026}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-se2026}
+      JWT_SECRET: ${JWT_SECRET:?请在 .env.prod 中设置}
+      JWT_EXPIRES_IN_SECONDS: ${JWT_EXPIRES_IN_SECONDS:-604800}
+      # 演示/联调环境可置 true 以便用 dev-token 自测鉴权链路；
+      # 正式对外（或答辩结束）请改为 false，否则任何人都能签发任意用户的令牌
+      APP_ENABLE_DEV_TOKEN: ${APP_ENABLE_DEV_TOKEN:-true}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      UPLOAD_DIR: /data/uploads
+      TZ: Asia/Shanghai
+    volumes:
+      # 文献/成果附件落宿主机磁盘，容器重建不丢
+      - uploads:/data/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - se2026
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1:8080/api/v1/health || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  web:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    image: se2026-web:latest
+    container_name: se2026-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-80}:80"
+    depends_on:
+      - backend
+    networks:
+      - se2026
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1/health || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  se2026:
+    name: se2026-net
+    driver: bridge
+
+volumes:
+  mysql_data:
+    name: se2026-prod-mysql-data
+  uploads:
+    name: se2026-prod-uploads
