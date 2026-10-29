@@ -1,11 +1,23 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { authApi } from '@/api'
 import { useUserStore } from '@/store/user'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+
+// token 持久化在 localStorage，userInfo 只在内存：刷新后凭 token 重新拉取；
+// 失败（401）由 Axios 响应拦截器统一清态并跳登录，这里无需额外处理
+onMounted(() => {
+  if (userStore.token && !userStore.userInfo) {
+    authApi
+      .fetchMe()
+      .then((info) => userStore.setUserInfo(info))
+      .catch(() => {})
+  }
+})
 
 const menuItems = [
   { path: '/dashboard', title: '工作台' },
