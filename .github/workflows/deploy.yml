@@ -33,10 +33,22 @@ jobs:
     timeout-minutes: 25
 
     steps:
+      - name: 检查部署密钥是否已配置
+        id: guard
+        run: |
+          if [ -z "${{ secrets.DEPLOY_HOST }}" ]; then
+            echo "::warning::未配置 DEPLOY_HOST 等 Secrets，本次跳过部署。配置方法见 docs/07-上线运维手册.md 第四节。"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 检出代码
+        if: steps.guard.outputs.skip != 'true'
         uses: actions/checkout@v4
 
       - name: 打包部署产物
+        if: steps.guard.outputs.skip != 'true'
         run: |
           tar -czf "$RUNNER_TEMP/release.tgz" \
             --exclude='.git' \
@@ -44,6 +56,7 @@ jobs:
           ls -lh "$RUNNER_TEMP/release.tgz"
 
       - name: 配置 SSH
+        if: steps.guard.outputs.skip != 'true'
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
@@ -52,12 +65,14 @@ jobs:
           chmod 644 ~/.ssh/known_hosts
 
       - name: 上传产物
+        if: steps.guard.outputs.skip != 'true'
         run: |
           scp -P "${{ secrets.DEPLOY_PORT }}" \
             "$RUNNER_TEMP/release.tgz" \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/tmp/release.tgz"
 
       - name: 解压并部署
+        if: steps.guard.outputs.skip != 'true'
         run: |
           ssh -p "${{ secrets.DEPLOY_PORT }}" \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" 'bash -s' <<'REMOTE'
@@ -70,6 +85,7 @@ jobs:
           REMOTE
 
       - name: 公网健康检查
+        if: steps.guard.outputs.skip != 'true'
         run: |
           for i in $(seq 1 6); do
             if curl -sf --max-time 5 "http://${{ secrets.DEPLOY_HOST }}/api/v1/health"; then
