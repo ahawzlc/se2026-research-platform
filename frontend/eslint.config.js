@@ -16,6 +16,19 @@ export default tseslint.config(
     languageOptions: {
       parserOptions: {
         parser: tseslint.parser
+      },
+      // .ts 里 no-undef 已由 typescript-eslint 关闭（TS 编译器自会检查），
+      // 但 .vue 的 script 块不在其覆盖范围，需显式声明浏览器全局对象
+      globals: {
+        navigator: 'readonly',
+        window: 'readonly',
+        document: 'readonly',
+        localStorage: 'readonly',
+        console: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly'
       }
     }
   },

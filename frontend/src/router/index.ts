@@ -70,7 +70,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'members',
         name: 'members',
-        component: () => import('@/views/PlaceholderView.vue'),
+        component: () => import('@/views/MembersView.vue'),
         meta: { title: '课题组成员', owner: 'A' }
       }
     ]
