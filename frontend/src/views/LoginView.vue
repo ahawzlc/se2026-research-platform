@@ -109,15 +109,6 @@ async function handleSubmit(): Promise<void> {
           {{ mode === 'login' ? '注册' : '登录' }}
         </el-link>
       </div>
-
-      <el-alert
-        class="login-tip"
-        type="info"
-        :closable="false"
-        show-icon
-        title="后端尚未就绪"
-        description="后端技术选型待定，接口暂不可用。当前页面用于确定前端登录流程与统一返回体对接方式。"
-      />
     </div>
   </div>
 </template>
@@ -162,9 +153,5 @@ async function handleSubmit(): Promise<void> {
   font-size: 13px;
   color: #909399;
   text-align: center;
-}
-
-.login-tip {
-  margin-top: 20px;
 }
 </style>
