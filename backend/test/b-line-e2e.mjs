@@ -394,6 +394,17 @@ async function main() {
   const logsComment = await countLogs(tokenA, 'comment_create')
   ok('comment_create 埋点已写入', logsComment === 1, `实际 ${logsComment}`)
 
+  // ref 契约（docs/03 第九节）：refType 固定 message、refId 为评论消息 id。
+  // 2026-11-03 生产联调曾发现写入 task 维度导致 D-1 统计判 invalid_ref，此处固化回归断言。
+  const payloadA = JSON.parse(Buffer.from(tokenA.split('.')[1], 'base64').toString('utf8'))
+  const commentLog = await prisma.activityLog.findFirst({
+    where: { userId: BigInt(payloadA.sub), type: 'comment_create' },
+    orderBy: { id: 'desc' },
+    select: { refType: true, refId: true },
+  })
+  ok('埋点 ref 契约：refType=message', commentLog?.refType === 'message', `实际 ${commentLog?.refType}`)
+  ok('埋点 ref 契约：refId=消息id', String(commentLog?.refId) === String(c1.data.id), `实际 ${commentLog?.refId} vs 消息 ${c1.data?.id}`)
+
   // 单日上限 10 条
   for (let i = 0; i < 12; i++) {
     await api(`/tasks/${taskId}/comments`, {

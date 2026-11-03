@@ -75,14 +75,18 @@ export class TaskCommentsService {
 
     // 埋点（反刷分第 2 条）：评论本身照常发布，但超出单日上限的部分**不再计入**参与度。
     // 这样既不影响正常讨论，又堵住了「狂刷评论刷分」的路子。
+    // ref 契约（docs/03 第九节）：comment_create 的 refType 固定 message、
+    // refId 为具体评论消息 id——D-1 统计侧按此校验（消息有效 + 会话 type=comment
+    // + 发送人与行为人一致）。若写 task 维度，同任务第二条评论会撞去重键，
+    // 且统计侧判 invalid_ref 不计分（2026-11-03 生产联调发现，已对齐）。
     const withinLimit = await this.isWithinDailyLimit(userId);
     if (withinLimit) {
       await this.activity.record({
         userId,
         teamId: project.teamId,
         type: ActivityType.COMMENT_CREATE,
-        refType: 'task',
-        refId: task.id,
+        refType: 'message',
+        refId: message.id,
       });
     }
 
