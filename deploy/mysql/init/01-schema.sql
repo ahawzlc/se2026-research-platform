@@ -5,9 +5,13 @@
 #   1. 本脚本由 MySQL 官方镜像在容器首次启动时自动执行
 #      （挂载于 /docker-entrypoint-initdb.d/）；
 #   2. 仅在数据卷为空时执行，重建库请先 `docker compose down -v`；
-#   3. 未使用外键约束：逻辑删除与级联删除策略在应用层控制，避免容器化迁移
-#      与逻辑删除互相打架；表间关系以 docs/02-数据字典.md 为准；
-#   4. 口径以 docs/02-数据字典.md 为唯一来源，改表请先改文档。
+#   3. 外键约束与 backend/prisma/schema.prisma 严格对齐（约束名
+#      `<表>_<列>_fkey`、ON DELETE RESTRICT / 可空列 SET NULL / ON UPDATE CASCADE）。
+#      逻辑删除仍在应用层控制，外键只兜底「物理孤儿行」；
+#      多态引用列（conversation.ref_id / activity_log.ref_id / message.ref_id）
+#      无法建外键，指向哪张表由应用层 ref_type 决定；
+#   4. 已有数据库升级不用重跑本脚本，用 migrations/ 下的增量脚本；
+#   5. 口径以 docs/02-数据字典.md 为唯一来源，改表请先改文档。
 # ==============================================================================
 
 SET NAMES utf8mb4;
@@ -51,7 +55,8 @@ CREATE TABLE `team` (
   `deleted`     TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_team_invite_code` (`invite_code`),
-  KEY `idx_team_owner` (`owner_id`)
+  KEY `idx_team_owner` (`owner_id`),
+  CONSTRAINT `team_owner_id_fkey` FOREIGN KEY (`owner_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='课题组';
 
 DROP TABLE IF EXISTS `team_member`;
@@ -65,7 +70,9 @@ CREATE TABLE `team_member` (
   `deleted`    TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_team_member` (`team_id`, `user_id`),
-  KEY `idx_team_member_user` (`user_id`)
+  KEY `idx_team_member_user` (`user_id`),
+  CONSTRAINT `team_member_team_id_fkey` FOREIGN KEY (`team_id`) REFERENCES `team` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `team_member_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='课题组成员';
 
 -- ==============================================================================
@@ -84,7 +91,8 @@ CREATE TABLE `file` (
   `created_at`    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '上传时间',
   `deleted`       TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
-  KEY `idx_file_uploader` (`uploader_id`)
+  KEY `idx_file_uploader` (`uploader_id`),
+  CONSTRAINT `file_uploader_id_fkey` FOREIGN KEY (`uploader_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='上传文件（补充表）';
 
 -- ==============================================================================
@@ -104,7 +112,8 @@ CREATE TABLE `project` (
   `updated_at`  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   `deleted`     TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
-  KEY `idx_project_team` (`team_id`)
+  KEY `idx_project_team` (`team_id`),
+  CONSTRAINT `project_team_id_fkey` FOREIGN KEY (`team_id`) REFERENCES `team` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='项目';
 
 DROP TABLE IF EXISTS `project_member`;
@@ -116,7 +125,10 @@ CREATE TABLE `project_member` (
   `updated_at` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   `deleted`    TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_project_member` (`project_id`, `user_id`)
+  UNIQUE KEY `uk_project_member` (`project_id`, `user_id`),
+  KEY `project_member_user_id_fkey` (`user_id`),
+  CONSTRAINT `project_member_project_id_fkey` FOREIGN KEY (`project_id`) REFERENCES `project` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `project_member_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='项目成员';
 
 DROP TABLE IF EXISTS `milestone`;
@@ -130,7 +142,8 @@ CREATE TABLE `milestone` (
   `updated_at` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   `deleted`    TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
-  KEY `idx_milestone_project` (`project_id`)
+  KEY `idx_milestone_project` (`project_id`),
+  CONSTRAINT `milestone_project_id_fkey` FOREIGN KEY (`project_id`) REFERENCES `project` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='里程碑';
 
 DROP TABLE IF EXISTS `task`;
@@ -149,7 +162,9 @@ CREATE TABLE `task` (
   `deleted`     TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
   KEY `idx_task_project_status` (`project_id`, `status`, `sort_order`),
-  KEY `idx_task_assignee` (`assignee_id`)
+  KEY `idx_task_assignee` (`assignee_id`),
+  CONSTRAINT `task_project_id_fkey` FOREIGN KEY (`project_id`) REFERENCES `project` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `task_assignee_id_fkey` FOREIGN KEY (`assignee_id`) REFERENCES `user` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='任务';
 
 DROP TABLE IF EXISTS `literature`;
@@ -167,7 +182,13 @@ CREATE TABLE `literature` (
   `deleted`     TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
   KEY `idx_literature_team` (`team_id`),
-  KEY `idx_literature_uploader` (`uploader_id`)
+  KEY `idx_literature_uploader` (`uploader_id`),
+  KEY `literature_project_id_fkey` (`project_id`),
+  KEY `literature_file_id_fkey` (`file_id`),
+  CONSTRAINT `literature_team_id_fkey` FOREIGN KEY (`team_id`) REFERENCES `team` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `literature_project_id_fkey` FOREIGN KEY (`project_id`) REFERENCES `project` (`id`) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT `literature_uploader_id_fkey` FOREIGN KEY (`uploader_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `literature_file_id_fkey` FOREIGN KEY (`file_id`) REFERENCES `file` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文献';
 
 DROP TABLE IF EXISTS `literature_tag`;
@@ -178,7 +199,8 @@ CREATE TABLE `literature_tag` (
   `created_at`    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `deleted`       TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_literature_tag` (`literature_id`, `tag`)
+  UNIQUE KEY `uk_literature_tag` (`literature_id`, `tag`),
+  CONSTRAINT `literature_tag_literature_id_fkey` FOREIGN KEY (`literature_id`) REFERENCES `literature` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文献标签';
 
 DROP TABLE IF EXISTS `meeting`;
@@ -193,7 +215,8 @@ CREATE TABLE `meeting` (
   `updated_at` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   `deleted`    TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
-  KEY `idx_meeting_project` (`project_id`, `held_at`)
+  KEY `idx_meeting_project` (`project_id`, `held_at`),
+  CONSTRAINT `meeting_project_id_fkey` FOREIGN KEY (`project_id`) REFERENCES `project` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会议记录';
 
 DROP TABLE IF EXISTS `meeting_attendee`;
@@ -204,7 +227,10 @@ CREATE TABLE `meeting_attendee` (
   `created_at` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `deleted`    TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_meeting_attendee` (`meeting_id`, `user_id`)
+  UNIQUE KEY `uk_meeting_attendee` (`meeting_id`, `user_id`),
+  KEY `meeting_attendee_user_id_fkey` (`user_id`),
+  CONSTRAINT `meeting_attendee_meeting_id_fkey` FOREIGN KEY (`meeting_id`) REFERENCES `meeting` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `meeting_attendee_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='参会人';
 
 DROP TABLE IF EXISTS `achievement`;
@@ -219,7 +245,10 @@ CREATE TABLE `achievement` (
   `updated_at`  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   `deleted`     TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
-  KEY `idx_achievement_project` (`project_id`)
+  KEY `idx_achievement_project` (`project_id`),
+  KEY `achievement_file_id_fkey` (`file_id`),
+  CONSTRAINT `achievement_project_id_fkey` FOREIGN KEY (`project_id`) REFERENCES `project` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `achievement_file_id_fkey` FOREIGN KEY (`file_id`) REFERENCES `file` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='成果';
 
 DROP TABLE IF EXISTS `achievement_member`;
@@ -232,7 +261,10 @@ CREATE TABLE `achievement_member` (
   `updated_at`        DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   `deleted`           TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_achievement_member` (`achievement_id`, `user_id`)
+  UNIQUE KEY `uk_achievement_member` (`achievement_id`, `user_id`),
+  KEY `achievement_member_user_id_fkey` (`user_id`),
+  CONSTRAINT `achievement_member_achievement_id_fkey` FOREIGN KEY (`achievement_id`) REFERENCES `achievement` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `achievement_member_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='成果成员关联';
 
 -- ==============================================================================
@@ -264,7 +296,9 @@ CREATE TABLE `conversation_member` (
   `deleted`         TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_conversation_member` (`conversation_id`, `user_id`),
-  KEY `idx_cm_user` (`user_id`)
+  KEY `idx_cm_user` (`user_id`),
+  CONSTRAINT `conversation_member_conversation_id_fkey` FOREIGN KEY (`conversation_id`) REFERENCES `conversation` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `conversation_member_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话成员与已读位点';
 
 DROP TABLE IF EXISTS `message`;
@@ -279,7 +313,10 @@ CREATE TABLE `message` (
   `created_at`      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `deleted`         TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
-  KEY `idx_message_conversation` (`conversation_id`, `id`)
+  KEY `idx_message_conversation` (`conversation_id`, `id`),
+  KEY `message_sender_id_fkey` (`sender_id`),
+  CONSTRAINT `message_conversation_id_fkey` FOREIGN KEY (`conversation_id`) REFERENCES `conversation` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `message_sender_id_fkey` FOREIGN KEY (`sender_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息';
 
 -- ==============================================================================
@@ -300,7 +337,9 @@ CREATE TABLE `activity_log` (
   KEY `idx_log_team_user_time` (`team_id`, `user_id`, `created_at`),
   KEY `idx_log_team_type` (`team_id`, `type`),
   KEY `idx_log_user_time` (`user_id`, `created_at`),
-  KEY `idx_log_ref` (`type`, `ref_type`, `ref_id`)
+  KEY `idx_log_ref` (`type`, `ref_type`, `ref_id`),
+  CONSTRAINT `activity_log_team_id_fkey` FOREIGN KEY (`team_id`) REFERENCES `team` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `activity_log_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='行为埋点流水（只增不改）';
 
 SET FOREIGN_KEY_CHECKS = 1;

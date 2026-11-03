@@ -7,6 +7,7 @@ deploy/
 ├── docker-compose.yml        本地开发依赖编排（MySQL 8 + Redis 7）
 ├── .env.example              环境变量示例（复制为 .env 使用）
 ├── mysql/init/01-schema.sql  建库脚本，容器首次启动自动执行
+├── mysql/migrations/         存量库增量脚本（有数据的库手动执行，见各脚本头部说明）
 └── nginx/default.conf        Nginx 反代配置（首次上线时启用）
 ```
 
@@ -38,7 +39,8 @@ docker compose logs -f mysql  # 查看 MySQL 日志
 若你要修改表结构：
 
 - 开发早期：直接改 `01-schema.sql`，然后 `docker compose down -v && docker compose up -d` 重建（**会清空数据**）；
-- 有数据之后：新增 `mysql/init/02-xxx.sql` 增量脚本，但注意 init 目录只在首次初始化时整体执行，已有数据卷不会重跑——此时应手动执行增量 SQL。
+- 有数据之后：在 `mysql/migrations/` 下新增增量脚本并**手动执行**（init 目录只在首次初始化时整体执行，已有数据卷不会重跑）。同时同步 `backend/prisma/schema.prisma` 与 `docs/02-数据字典.md`，三处必须一致——2026-11-03 曾因 init SQL 与 Prisma schema 外键口径漂移导致同一验收脚本在不同建库方式下行为不同。
+- ⚠️ **严禁把 `01-schema.sql` 灌进已有数据的 MySQL 实例**：脚本内含 `CREATE DATABASE se2026; USE se2026;` 与逐表 `DROP TABLE`，无论命令行指定哪个库都会打到 `se2026` 上（2026-11-03 事故实例，见 docs/07）。要建验证库，先把脚本里的库名 sed 成目标名再导入。
 
 ## 注意事项
 
