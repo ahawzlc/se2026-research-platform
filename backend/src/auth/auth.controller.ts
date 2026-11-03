@@ -13,6 +13,7 @@ import { DevTokenDto } from './dto/dev-token.dto';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { UpdatePasswordDto } from './dto/update-password.dto';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { CurrentUserPayload } from '../common/decorators/current-user.decorator';
@@ -54,6 +55,17 @@ export class AuthController {
     @Body() dto: UpdateProfileDto,
   ) {
     return this.auth.updateProfile(user.userId, dto);
+  }
+
+  @Put('password')
+  @ApiOperation({
+    summary: '修改密码（旧密码验证，成功返回新令牌，卡 A-补2）',
+  })
+  updatePassword(
+    @CurrentUser() user: CurrentUserPayload,
+    @Body() dto: UpdatePasswordDto,
+  ) {
+    return this.auth.updatePassword(user.userId, dto);
   }
 
   @Public()

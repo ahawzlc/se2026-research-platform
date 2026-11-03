@@ -10,6 +10,7 @@ import { isUniqueViolation } from '../common/prisma-errors';
 import type { RegisterDto } from './dto/register.dto';
 import type { LoginDto } from './dto/login.dto';
 import type { UpdateProfileDto } from './dto/update-profile.dto';
+import type { UpdatePasswordDto } from './dto/update-password.dto';
 
 /** JWT 载荷：sub 为用户主键（字符串形式，避免超出 Number 精度） */
 export interface JwtPayload {
@@ -159,6 +160,29 @@ export class AuthService {
       ...this.toSafeUser(updated),
       createdAt: formatDateTime(updated.createdAt),
     };
+  }
+
+  /**
+   * 修改密码（卡 A-补2）：旧密码验证通过后落新 hash，并签发新令牌返回。
+   * 已知取舍（见任务卡）：无状态 JWT 无黑名单，旧令牌接受 7 天自然过期。
+   */
+  async updatePassword(
+    userId: string,
+    dto: UpdatePasswordDto,
+  ): Promise<AuthResult> {
+    const user = await this.findActiveUser(userId);
+    if (!(await bcrypt.compare(dto.oldPassword, user.passwordHash))) {
+      throw BizException.unauthorized('旧密码不正确');
+    }
+    if (dto.oldPassword === dto.newPassword) {
+      throw BizException.param('新密码不能与旧密码相同');
+    }
+    const passwordHash = await bcrypt.hash(dto.newPassword, BCRYPT_SALT_ROUNDS);
+    const updated = await this.prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash },
+    });
+    return this.issueAuthResult(updated);
   }
 
   // ---------------------------------------------------------------- 内部
