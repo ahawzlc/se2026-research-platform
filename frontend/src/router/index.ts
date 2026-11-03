@@ -40,7 +40,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'tasks',
         name: 'tasks',
-        component: () => import('@/views/PlaceholderView.vue'),
+        component: () => import('@/views/TasksView.vue'),
         meta: { title: '任务看板', owner: 'B' }
       },
       {

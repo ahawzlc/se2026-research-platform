@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
- * B 线端到端验收脚本 · 任务卡 B-1（项目与里程碑）。
+ * B 线端到端验收脚本 · 任务卡 B-1 / B-2。
  *
  * 用法：node test/b-line-e2e.mjs
  * 前置：后端已启动（localhost:8080），MySQL 已就绪。
  *
  * 覆盖：
  *   B-1 项目与里程碑：CRUD、团队隔离、milestone_done 埋点
+ *   B-2 任务看板：CRUD、状态流转、task_done 幂等、order 持久化
  */
 
 const BASE = process.env.BASE_URL || 'http://localhost:8080/api/v1'
@@ -266,8 +267,107 @@ async function main() {
   const logsAfterRevoke = await countLogs(tokenA, 'milestone_done')
   ok('退回 pending 后撤销埋点（权重归零）', logsAfterRevoke === 0, `实际 ${logsAfterRevoke}`)
 
+  // ---------------------------------------------------------------- B-2
+  section('B-2 任务看板')
+
+  const task = await api('/tasks', {
+    method: 'POST',
+    token: tokenA,
+    body: {
+      projectId,
+      title: `写文献综述_${suffix}`,
+      description: 'E2E',
+      assigneeId: regA.data?.user?.id,
+      priority: 'high',
+      dueDate: '2026-11-20'
+    }
+  })
+  ok('创建任务', task.code === 0, JSON.stringify(task).slice(0, 150))
+  const taskId = task.data?.id
+  ok('任务 sort_order 为整数间隔初值', task.data?.sortOrder === 100, `实际 ${task.data?.sortOrder}`)
+
+  const logsCreate = await countLogs(tokenA, 'task_create')
+  ok('task_create 埋点已写入', logsCreate === 1, `实际 ${logsCreate}`)
+
+  const taskList = await api(`/tasks?projectId=${projectId}`, { token: tokenA })
+  ok('按项目过滤任务列表', taskList.code === 0 && taskList.data.total === 1)
+
+  const taskListC = await api(`/tasks?projectId=${projectId}`, { token: tokenC })
+  ok('C（未入组）看不到任务', taskListC.code === 0 && taskListC.data.total === 0)
+
+  // 状态流转：todo -> doing -> done
+  const toDoing = await api(`/tasks/${taskId}/status`, {
+    method: 'PUT',
+    token: tokenA,
+    body: { status: 'doing' }
+  })
+  ok('状态流转 doing', toDoing.code === 0 && toDoing.data.status === 'doing')
+
+  const toDone = await api(`/tasks/${taskId}/status`, {
+    method: 'PUT',
+    token: tokenA,
+    body: { status: 'done' }
+  })
+  ok('状态流转 done', toDone.code === 0 && toDone.data.status === 'done')
+
+  const logsDone = await countLogs(tokenA, 'task_done')
+  ok('task_done 埋点已写入', logsDone === 1, `实际 ${logsDone}`)
+
+  // 幂等：done -> doing -> done 反复拖拽
+  await api(`/tasks/${taskId}/status`, { method: 'PUT', token: tokenA, body: { status: 'doing' } })
+  const logsAfterBack = await countLogs(tokenA, 'task_done')
+  ok('从 done 退回后 task_done 被撤销', logsAfterBack === 0, `实际 ${logsAfterBack}`)
+
+  await api(`/tasks/${taskId}/status`, { method: 'PUT', token: tokenA, body: { status: 'done' } })
+  const logsAfterRedo = await countLogs(tokenA, 'task_done')
+  ok('再次完成重新计一次分', logsAfterRedo === 1, `实际 ${logsAfterRedo}`)
+
+  await api(`/tasks/${taskId}/status`, { method: 'PUT', token: tokenA, body: { status: 'done' } })
+  const logsIdem = await countLogs(tokenA, 'task_done')
+  ok('反复拖到 done 不重复计分（幂等）', logsIdem === 1, `实际 ${logsIdem}`)
+
+  // 排序持久化
+  const t2 = await api('/tasks', {
+    method: 'POST',
+    token: tokenA,
+    body: { projectId, title: `任务B_${suffix}` }
+  })
+  const t3 = await api('/tasks', {
+    method: 'POST',
+    token: tokenA,
+    body: { projectId, title: `任务C_${suffix}` }
+  })
+  ok('再建两个任务用于排序', t2.code === 0 && t3.code === 0)
+
+  const order = await api(`/tasks/${t3.data.id}/order`, {
+    method: 'PUT',
+    token: tokenA,
+    body: { beforeSortOrder: 100, afterSortOrder: 200 }
+  })
+  ok('调整排序（取中值 150）', order.code === 0 && order.data.sortOrder === 150, `实际 ${order.data?.sortOrder}`)
+
+  const orderHead = await api(`/tasks/${t3.data.id}/order`, {
+    method: 'PUT',
+    token: tokenA,
+    body: { beforeSortOrder: null, afterSortOrder: 100 }
+  })
+  ok('拖到列首（before=null 时取 100-100=0→重排兜底）', orderHead.code === 0, JSON.stringify(orderHead).slice(0, 120))
+
+  const orderFetch = await api(`/tasks/${taskId}`, { token: tokenA })
+  ok('排序后任务仍可读', orderFetch.code === 0)
+
+  const updTask = await api(`/tasks/${taskId}`, {
+    method: 'PUT',
+    token: tokenA,
+    body: { title: `改名后的任务_${suffix}`, priority: 'low' }
+  })
+  ok('更新任务', updTask.code === 0 && updTask.data.priority === 'low')
+
   // ---------------------------------------------------------------- 清理
   section('清理：删除任务与项目')
+
+  const delTask = await api(`/tasks/${taskId}`, { method: 'DELETE', token: tokenA })
+  ok('删除任务', delTask.code === 0)
 
   const delProj = await api(`/projects/${projectId}`, { method: 'DELETE', token: tokenA })
   ok('删除项目', delProj.code === 0)
@@ -291,11 +391,14 @@ async function main() {
   // 这里把该项目下的里程碑、任务、评论彻底物理删除，
   // 否则每跑一次就会留下一批「第一阶段_xxx」「任务B_xxx」的孤儿数据。
   const pid = BigInt(projectId)
+  await prisma.message.deleteMany({ where: { conversation: { refType: 'task', refId: { in: (await prisma.task.findMany({ where: { projectId: pid }, select: { id: true } })).map((t) => t.id) } } } })
+  await prisma.conversation.deleteMany({ where: { refType: 'task', refId: { in: (await prisma.task.findMany({ where: { projectId: pid }, select: { id: true } })).map((t) => t.id) } } })
+  await prisma.task.deleteMany({ where: { projectId: pid } })
   await prisma.milestone.deleteMany({ where: { projectId: pid } })
   await prisma.projectMember.deleteMany({ where: { projectId: pid } })
   await prisma.project.deleteMany({ where: { id: pid } })
-  const leftovers = await prisma.milestone.count({ where: { projectId: pid } })
-  ok('清理项目下的里程碑', leftovers === 0, `残留 ${leftovers} 条`)
+  const leftovers = await prisma.task.count({ where: { projectId: pid } }) + await prisma.milestone.count({ where: { projectId: pid } })
+  ok('清理项目下的任务与里程碑', leftovers === 0, `残留 ${leftovers} 条`)
 
   // 顺手清掉本次注册的两个用户（及其埋点），保持库干净
   for (const username of [userA, userB, userC]) {
