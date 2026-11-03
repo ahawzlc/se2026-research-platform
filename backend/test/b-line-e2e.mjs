@@ -86,15 +86,8 @@ const suffix = Date.now().toString(36)
  * 这里在每次开跑前统一物理删除，保证库可重复使用。
  */
 async function purgeStaleTestData() {
-  const staleTeams = await prisma.team.findMany({
-    where: { name: { startsWith: 'B线测试组_' } },
-    select: { id: true },
-  })
-  for (const t of staleTeams) {
-    await prisma.teamMember.deleteMany({ where: { teamId: t.id } })
-    await prisma.team.delete({ where: { id: t.id } })
-  }
-
+  // 注意顺序：必须先删项目子树（含任务/里程碑/会话），再删课题组。
+  // project.team_id 有外键约束，先删 team 会触发 P2003 且留下清不掉的残留。
   const staleProjects = await prisma.project.findMany({
     where: { name: { startsWith: 'B线测试项目' } },
     select: { id: true },
@@ -102,11 +95,24 @@ async function purgeStaleTestData() {
   for (const p of staleProjects) {
     const taskIds = (await prisma.task.findMany({ where: { projectId: p.id }, select: { id: true } })).map((t) => t.id)
     await prisma.message.deleteMany({ where: { conversation: { refType: 'task', refId: { in: taskIds } } } })
+    await prisma.conversationMember.deleteMany({ where: { conversation: { refType: 'task', refId: { in: taskIds } } } })
     await prisma.conversation.deleteMany({ where: { refType: 'task', refId: { in: taskIds } } })
     await prisma.task.deleteMany({ where: { projectId: p.id } })
     await prisma.milestone.deleteMany({ where: { projectId: p.id } })
     await prisma.projectMember.deleteMany({ where: { projectId: p.id } })
     await prisma.project.delete({ where: { id: p.id } })
+  }
+
+  const staleTeams = await prisma.team.findMany({
+    where: { name: { startsWith: 'B线测试组_' } },
+    select: { id: true },
+  })
+  for (const t of staleTeams) {
+    // activity_log / literature 也带 team_id 外键，须随 teamMember 一并先清
+    await prisma.activityLog.deleteMany({ where: { teamId: t.id } })
+    await prisma.literature.deleteMany({ where: { teamId: t.id } })
+    await prisma.teamMember.deleteMany({ where: { teamId: t.id } })
+    await prisma.team.delete({ where: { id: t.id } })
   }
 
   const staleUsers = await prisma.user.findMany({
@@ -418,23 +424,12 @@ async function main() {
   const listAfterDel = await api('/projects', { token: tokenA })
   ok('删除后列表不再包含该项目', !listAfterDel.data.list.some((p) => p.id === projectId))
 
-  // 课题组没有对外的删除接口，这里直接用 Prisma 收尾，
-  // 否则每跑一次脚本就会在库里留一个「B线测试组_xxx」。
-  const teamRows = await prisma.team.findMany({
-    where: { id: BigInt(teamId) },
-    select: { id: true },
-  })
-  if (teamRows.length > 0) {
-    await prisma.teamMember.deleteMany({ where: { teamId: BigInt(teamId) } })
-    await prisma.team.delete({ where: { id: BigInt(teamId) } })
-  }
-  ok('清理测试课题组', teamRows.length === 0 || true)
-
   // 项目删的是逻辑删除（deleted=1），行还在库里。
   // 这里把该项目下的里程碑、任务、评论彻底物理删除，
   // 否则每跑一次就会留下一批「第一阶段_xxx」「任务B_xxx」的孤儿数据。
   const pid = BigInt(projectId)
   await prisma.message.deleteMany({ where: { conversation: { refType: 'task', refId: { in: (await prisma.task.findMany({ where: { projectId: pid }, select: { id: true } })).map((t) => t.id) } } } })
+  await prisma.conversationMember.deleteMany({ where: { conversation: { refType: 'task', refId: { in: (await prisma.task.findMany({ where: { projectId: pid }, select: { id: true } })).map((t) => t.id) } } } })
   await prisma.conversation.deleteMany({ where: { refType: 'task', refId: { in: (await prisma.task.findMany({ where: { projectId: pid }, select: { id: true } })).map((t) => t.id) } } })
   await prisma.task.deleteMany({ where: { projectId: pid } })
   await prisma.milestone.deleteMany({ where: { projectId: pid } })
@@ -442,6 +437,23 @@ async function main() {
   await prisma.project.deleteMany({ where: { id: pid } })
   const leftovers = await prisma.task.count({ where: { projectId: pid } }) + await prisma.milestone.count({ where: { projectId: pid } })
   ok('清理项目下的任务与里程碑', leftovers === 0, `残留 ${leftovers} 条`)
+
+  // 课题组没有对外的删除接口，这里直接用 Prisma 收尾，
+  // 否则每跑一次脚本就会在库里留一个「B线测试组_xxx」。
+  // 注意顺序：project / activity_log / literature 都带 team_id 外键，
+  // 必须先物理删完项目子树与埋点流水再删课题组，
+  // 否则 team.delete 会触发 P2003 外键冲突，脚本收尾崩溃并留下残留。
+  const teamRows = await prisma.team.findMany({
+    where: { id: BigInt(teamId) },
+    select: { id: true },
+  })
+  if (teamRows.length > 0) {
+    await prisma.activityLog.deleteMany({ where: { teamId: BigInt(teamId) } })
+    await prisma.literature.deleteMany({ where: { teamId: BigInt(teamId) } })
+    await prisma.teamMember.deleteMany({ where: { teamId: BigInt(teamId) } })
+    await prisma.team.delete({ where: { id: BigInt(teamId) } })
+  }
+  ok('清理测试课题组', teamRows.length === 0 || true)
 
   // 顺手清掉本次注册的两个用户（及其埋点），保持库干净
   for (const username of [userA, userB, userC]) {
