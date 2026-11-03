@@ -27,7 +27,7 @@ function buildUser(overrides: Record<string, unknown> = {}) {
 /** 构造 mock 依赖的 AuthService；返回 mock 便于逐用例覆写返回值 */
 function createService() {
   const prisma = {
-    user: { findFirst: jest.fn(), create: jest.fn() },
+    user: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
     teamMember: { findMany: jest.fn().mockResolvedValue([]) },
   };
   const jwt = { signAsync: jest.fn().mockResolvedValue('token-abc') };
@@ -179,5 +179,70 @@ describe('AuthService.me', () => {
     expect(profile.id).toBe('1');
     expect(profile.createdAt).toBe('2026-10-29 10:00:00');
     expect(profile).not.toHaveProperty('passwordHash');
+  });
+});
+
+describe('AuthService.updateProfile（卡 A-补1）', () => {
+  it('一个字段都不传 → 400', async () => {
+    const { service } = createService();
+    await expectBizError(
+      service.updateProfile('1', {}),
+      400,
+      '请至少提供要修改的字段（nickname / email）',
+    );
+  });
+
+  it('账号不存在 → 401，不触发更新', async () => {
+    const { service, prisma } = createService();
+    prisma.user.findFirst.mockResolvedValue(null);
+    await expectBizError(
+      service.updateProfile('1', { nickname: '新名' }),
+      401,
+      '账号不存在或已被删除',
+    );
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('只改昵称：update 数据不含 email，返回结构与 me 一致', async () => {
+    const { service, prisma } = createService();
+    prisma.user.findFirst.mockResolvedValue(buildUser());
+    prisma.user.update.mockImplementation(
+      (_args: { data: Record<string, string> }) =>
+        Promise.resolve(buildUser({ ..._args.data })),
+    );
+
+    const profile = await service.updateProfile('1', { nickname: '张三丰' });
+
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 1n },
+        data: { nickname: '张三丰' },
+      }),
+    );
+    expect(profile.nickname).toBe('张三丰');
+    expect(profile.email).toBe('zhangsan@example.com');
+    expect(profile.id).toBe('1');
+    expect(profile.createdAt).toBe('2026-10-29 10:00:00');
+    expect(profile).not.toHaveProperty('passwordHash');
+  });
+
+  it('同时改昵称与邮箱', async () => {
+    const { service, prisma } = createService();
+    prisma.user.findFirst.mockResolvedValue(buildUser());
+    prisma.user.update.mockImplementation(
+      (_args: { data: Record<string, string> }) =>
+        Promise.resolve(buildUser({ ..._args.data })),
+    );
+
+    await service.updateProfile('1', {
+      nickname: '李四',
+      email: 'lisi@example.com',
+    });
+
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { nickname: '李四', email: 'lisi@example.com' },
+      }),
+    );
   });
 });
