@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * B 线端到端验收脚本 · 任务卡 B-1 / B-2。
+ * B 线端到端验收脚本（任务卡 B-1 / B-2 / B-3）。
  *
  * 用法：node test/b-line-e2e.mjs
  * 前置：后端已启动（localhost:8080），MySQL 已就绪。
@@ -8,6 +8,7 @@
  * 覆盖：
  *   B-1 项目与里程碑：CRUD、团队隔离、milestone_done 埋点
  *   B-2 任务看板：CRUD、状态流转、task_done 幂等、order 持久化
+ *   B-3 任务评论：读写、comment_create 埋点、单日上限
  */
 
 const BASE = process.env.BASE_URL || 'http://localhost:8080/api/v1'
@@ -295,7 +296,7 @@ async function main() {
   const taskListC = await api(`/tasks?projectId=${projectId}`, { token: tokenC })
   ok('C（未入组）看不到任务', taskListC.code === 0 && taskListC.data.total === 0)
 
-  // 状态流转：todo -> doing -> done
+  // 状态流转：todo → doing → done
   const toDoing = await api(`/tasks/${taskId}/status`, {
     method: 'PUT',
     token: tokenA,
@@ -313,7 +314,7 @@ async function main() {
   const logsDone = await countLogs(tokenA, 'task_done')
   ok('task_done 埋点已写入', logsDone === 1, `实际 ${logsDone}`)
 
-  // 幂等：done -> doing -> done 反复拖拽
+  // 幂等：done → doing → done 反复拖拽
   await api(`/tasks/${taskId}/status`, { method: 'PUT', token: tokenA, body: { status: 'doing' } })
   const logsAfterBack = await countLogs(tokenA, 'task_done')
   ok('从 done 退回后 task_done 被撤销', logsAfterBack === 0, `实际 ${logsAfterBack}`)
@@ -362,6 +363,48 @@ async function main() {
     body: { title: `改名后的任务_${suffix}`, priority: 'low' }
   })
   ok('更新任务', updTask.code === 0 && updTask.data.priority === 'low')
+
+  // ---------------------------------------------------------------- B-3
+  section('B-3 任务评论')
+
+  const c1 = await api(`/tasks/${taskId}/comments`, {
+    method: 'POST',
+    token: tokenA,
+    body: { content: '第一条评论' }
+  })
+  ok('发表评论', c1.code === 0 && c1.data.content === '第一条评论', JSON.stringify(c1).slice(0, 120))
+
+  const c2 = await api(`/tasks/${taskId}/comments`, {
+    method: 'POST',
+    token: tokenB,
+    body: { content: 'B 的回复' }
+  })
+  ok('B 发表评论', c2.code === 0)
+
+  const clist = await api(`/tasks/${taskId}/comments`, { token: tokenA })
+  ok('评论列表返回 2 条', clist.code === 0 && clist.data.length === 2, `实际 ${clist.data?.length}`)
+  ok('评论按时间正序', clist.data?.[0]?.content === '第一条评论')
+
+  const logsComment = await countLogs(tokenA, 'comment_create')
+  ok('comment_create 埋点已写入', logsComment === 1, `实际 ${logsComment}`)
+
+  // 单日上限 10 条
+  for (let i = 0; i < 12; i++) {
+    await api(`/tasks/${taskId}/comments`, {
+      method: 'POST',
+      token: tokenA,
+      body: { content: `刷量评论 ${i}` }
+    })
+  }
+  const logsAfterFlood = await countLogs(tokenA, 'comment_create')
+  ok('单日评论埋点上限 10 条（超出不再计入）', logsAfterFlood === 10, `实际 ${logsAfterFlood}`)
+
+  const clistAfter = await api(`/tasks/${taskId}/comments`, { token: tokenA })
+  ok('超上限后评论仍可正常发表', clistAfter.code === 0 && clistAfter.data.length === 14, `实际 ${clistAfter.data?.length}`)
+
+  // 越权：C 读不到评论
+  const clistC = await api(`/tasks/${taskId}/comments`, { token: tokenC })
+  ok('C（未入组）读评论返回 403', clistC.code === 403, `实际 ${clistC.code}`)
 
   // ---------------------------------------------------------------- 清理
   section('清理：删除任务与项目')

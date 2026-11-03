@@ -10,6 +10,7 @@ import { TeamsModule } from './teams/teams.module';
 import { FileModule } from './modules/file/file.module';
 import { ProjectsModule } from './projects/projects.module';
 import { TasksModule } from './tasks/tasks.module';
+import { ConversationsModule } from './conversations/conversations.module';
 import { HealthController } from './health/health.controller';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 
@@ -31,6 +32,8 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
     ProjectsModule,
     // B 线：任务看板（B-2）
     TasksModule,
+    // B 线：统一会话模型（B-3，与 C-5 协作消息共用）
+    ConversationsModule,
   ],
   controllers: [HealthController],
   providers: [
