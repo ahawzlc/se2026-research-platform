@@ -246,3 +246,68 @@ describe('AuthService.updateProfile（卡 A-补1）', () => {
     );
   });
 });
+
+describe('AuthService.updatePassword（卡 A-补2）', () => {
+  it('旧密码错误 → 401，不触发更新', async () => {
+    const { service, prisma } = createService();
+    prisma.user.findFirst.mockResolvedValue(buildUser());
+    await expectBizError(
+      service.updatePassword('1', {
+        oldPassword: 'Wrong123',
+        newPassword: 'NewPass1234',
+      }),
+      401,
+      '旧密码不正确',
+    );
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('新密码与旧密码相同 → 400', async () => {
+    const { service, prisma } = createService();
+    prisma.user.findFirst.mockResolvedValue(buildUser());
+    await expectBizError(
+      service.updatePassword('1', {
+        oldPassword: 'Test1234',
+        newPassword: 'Test1234',
+      }),
+      400,
+      '新密码不能与旧密码相同',
+    );
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('账号不存在 → 401', async () => {
+    const { service, prisma } = createService();
+    prisma.user.findFirst.mockResolvedValue(null);
+    await expectBizError(
+      service.updatePassword('1', {
+        oldPassword: 'Test1234',
+        newPassword: 'NewPass1234',
+      }),
+      401,
+      '账号不存在或已被删除',
+    );
+  });
+
+  it('成功：落新 hash 并返回令牌与用户信息', async () => {
+    const { service, prisma, jwt } = createService();
+    prisma.user.findFirst.mockResolvedValue(buildUser());
+    prisma.user.update.mockImplementation(
+      (args: { data: { passwordHash: string } }) =>
+        Promise.resolve(buildUser({ passwordHash: args.data.passwordHash })),
+    );
+
+    const result = await service.updatePassword('1', {
+      oldPassword: 'Test1234',
+      newPassword: 'NewPass1234',
+    });
+
+    const savedHash = prisma.user.update.mock.calls[0][0].data.passwordHash;
+    expect(savedHash).not.toBe(CORRECT_HASH);
+    expect(await bcrypt.compare('NewPass1234', savedHash)).toBe(true);
+    expect(result.token).toBe('token-abc');
+    expect(result.user.id).toBe('1');
+    expect(result.user).not.toHaveProperty('passwordHash');
+    expect(jwt.signAsync).toHaveBeenCalledTimes(1);
+  });
+});
