@@ -9,6 +9,7 @@ import { formatDateTime, toIdString } from '../common/datetime';
 import { isUniqueViolation } from '../common/prisma-errors';
 import type { RegisterDto } from './dto/register.dto';
 import type { LoginDto } from './dto/login.dto';
+import type { UpdateProfileDto } from './dto/update-profile.dto';
 
 /** JWT 载荷：sub 为用户主键（字符串形式，避免超出 Number 精度） */
 export interface JwtPayload {
@@ -135,6 +136,28 @@ export class AuthService {
     return {
       ...this.toSafeUser(user),
       createdAt: formatDateTime(user.createdAt),
+    };
+  }
+
+  /** 修改个人资料（卡 A-补1）：只能改本人，成功返回结构与 /auth/me 一致 */
+  async updateProfile(
+    userId: string,
+    dto: UpdateProfileDto,
+  ): Promise<UserProfile> {
+    if (dto.nickname === undefined && dto.email === undefined) {
+      throw BizException.param('请至少提供要修改的字段（nickname / email）');
+    }
+    const user = await this.findActiveUser(userId);
+    const updated = await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        ...(dto.nickname !== undefined ? { nickname: dto.nickname } : {}),
+        ...(dto.email !== undefined ? { email: dto.email } : {}),
+      },
+    });
+    return {
+      ...this.toSafeUser(updated),
+      createdAt: formatDateTime(updated.createdAt),
     };
   }
 

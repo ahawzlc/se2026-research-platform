@@ -1,10 +1,18 @@
-import { Body, Controller, Get, NotFoundException, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  NotFoundException,
+  Post,
+  Put,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { DevTokenDto } from './dto/dev-token.dto';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { CurrentUserPayload } from '../common/decorators/current-user.decorator';
@@ -35,6 +43,17 @@ export class AuthController {
   @ApiOperation({ summary: '获取当前登录用户（查库返回，含格式化注册时间）' })
   me(@CurrentUser() user: CurrentUserPayload) {
     return this.auth.me(user.userId);
+  }
+
+  @Put('profile')
+  @ApiOperation({
+    summary: '修改个人资料（昵称 / 邮箱，至少传一个，卡 A-补1）',
+  })
+  updateProfile(
+    @CurrentUser() user: CurrentUserPayload,
+    @Body() dto: UpdateProfileDto,
+  ) {
+    return this.auth.updateProfile(user.userId, dto);
   }
 
   @Public()
