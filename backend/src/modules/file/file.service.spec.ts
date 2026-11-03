@@ -1,3 +1,4 @@
+import { resolve as pathResolve } from 'node:path';
 import { ConfigService } from '@nestjs/config';
 import { FileService } from './file.service';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -120,8 +121,9 @@ describe('FileService.getDownloadInfo', () => {
       '02',
       `${MOCK_UUID}.pdf`,
     );
+    // 期望值同样用 resolve 构造，避免硬编码 POSIX 路径导致 Windows 下失败
     expect(info.absolutePath).toBe(
-      `/tmp/se2026-uploads-test/2026/11/02/${MOCK_UUID}.pdf`,
+      pathResolve('/tmp/se2026-uploads-test', `2026/11/02/${MOCK_UUID}.pdf`),
     );
     expect(info.mimeType).toBe('application/pdf');
     expect(info.originalName).toBe('论文.pdf');

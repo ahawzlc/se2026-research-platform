@@ -43,8 +43,13 @@ export class AllExceptionsFilter implements ExceptionFilter {
       httpStatus = exception.getStatus();
       code = httpStatusToCode(httpStatus);
       message = extractMessage(exception);
+      // multer 超限错误实际会被 Nest 包装成 BadRequestException('File too large')，
+      // 走到这里而不是下面的裸错误分支，统一映射为中文提示
+      if (message === 'File too large') {
+        message = '文件大小超过限制';
+      }
     } else if (isFileSizeLimitError(exception)) {
-      // multer 在文件超过 limits.fileSize 时抛的错误，非 HttpException
+      // multer 在文件超过 limits.fileSize 时抛的错误，非 HttpException（兜底）
       code = ErrorCode.PARAM_INVALID;
       message = '文件大小超过限制';
       httpStatus = codeToHttpStatus(ErrorCode.PARAM_INVALID);
