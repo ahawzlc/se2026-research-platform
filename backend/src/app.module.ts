@@ -6,6 +6,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { ActivityModule } from './activity/activity.module';
 import { AuthModule } from './auth/auth.module';
 import { TeamsModule } from './teams/teams.module';
+import { FileModule } from './modules/file/file.module';
 import { HealthController } from './health/health.controller';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 
@@ -21,6 +22,7 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
     ActivityModule,
     AuthModule,
     TeamsModule,
+    FileModule,
   ],
   controllers: [HealthController],
   providers: [
