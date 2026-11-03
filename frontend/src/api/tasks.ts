@@ -25,6 +25,17 @@ export interface TaskItem {
   createdAt: string
 }
 
+/** 评论条目（统一会话模型下的一条 message） */
+export interface CommentItem {
+  id: string
+  conversationId: string
+  senderId: string
+  senderName: string
+  content: string
+  msgType: string
+  createdAt: string
+}
+
 export interface TaskPayload {
   projectId: string
   title: string
@@ -91,4 +102,14 @@ export function updateTaskOrder(
   params: { beforeSortOrder?: number | null; afterSortOrder?: number | null }
 ) {
   return http.put<TaskItem>(`/api/v1/tasks/${id}/order`, params)
+}
+
+/** 任务下的评论列表 */
+export function fetchTaskComments(taskId: string) {
+  return http.get<CommentItem[]>(`/api/v1/tasks/${taskId}/comments`)
+}
+
+/** 发表任务评论（单日上限 10 条，超出仍可发言但不计入参与度） */
+export function createTaskComment(taskId: string, content: string) {
+  return http.post<CommentItem>(`/api/v1/tasks/${taskId}/comments`, { content })
 }

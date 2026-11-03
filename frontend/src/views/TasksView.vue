@@ -307,6 +307,44 @@ async function handleDelete(task: TaskItem): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------- 评论抽屉
+
+const commentVisible = ref(false)
+const commentTask = ref<TaskItem | null>(null)
+const comments = ref<Awaited<ReturnType<typeof tasksApi.fetchTaskComments>>>([])
+const commentText = ref('')
+const commentLoading = ref(false)
+const commentSubmitting = ref(false)
+
+async function openComments(task: TaskItem): Promise<void> {
+  commentTask.value = task
+  commentVisible.value = true
+  commentLoading.value = true
+  try {
+    comments.value = await tasksApi.fetchTaskComments(task.id)
+  } catch {
+    comments.value = []
+  } finally {
+    commentLoading.value = false
+  }
+}
+
+async function submitComment(): Promise<void> {
+  const content = commentText.value.trim()
+  if (!content || !commentTask.value) return
+  commentSubmitting.value = true
+  try {
+    const message = await tasksApi.createTaskComment(commentTask.value.id, content)
+    comments.value.push(message)
+    commentText.value = ''
+    ElMessage.success('评论已发表')
+  } catch {
+    // 提示由拦截器统一处理
+  } finally {
+    commentSubmitting.value = false
+  }
+}
+
 /** 是否已逾期：截止日期早于今天且未完成 */
 function isOverdue(task: TaskItem): boolean {
   if (!task.dueDate || task.status === 'done') return false
@@ -377,7 +415,7 @@ onMounted(async () => {
             @change="handleColumnChange(column.key, $event)"
           >
             <template #item="{ element }: { element: TaskItem }">
-              <div class="task-card">
+              <div class="task-card" @click="openComments(element)">
                 <div class="task-card-head">
                   <span class="task-title">{{ element.title }}</span>
                   <el-tag :type="PRIORITY_META[element.priority as TaskPriority]?.type ?? 'info'" size="small">
@@ -393,7 +431,8 @@ onMounted(async () => {
                 </div>
                 <div class="task-card-actions">
                   <el-button link type="primary" @click.stop="openEdit(element)">编辑</el-button>
-                    <el-button link type="danger" @click.stop="handleDelete(element)">删除</el-button>
+                  <el-button link type="primary" @click.stop="openComments(element)">评论</el-button>
+                  <el-button link type="danger" @click.stop="handleDelete(element)">删除</el-button>
                 </div>
               </div>
             </template>
@@ -445,6 +484,41 @@ onMounted(async () => {
         <el-button type="primary" :loading="formLoading" @click="handleSubmit">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 评论抽屉 -->
+    <el-drawer v-model="commentVisible" :title="`任务评论 · ${commentTask?.title ?? ''}`" size="480px">
+      <div v-loading="commentLoading" class="comment-list">
+        <el-empty v-if="comments.length === 0 && !commentLoading" description="还没有评论" :image-size="70" />
+        <div v-for="comment in comments" :key="comment.id" class="comment-item">
+          <div class="comment-head">
+            <span class="comment-author">{{ comment.senderName }}</span>
+            <span class="comment-time">{{ comment.createdAt }}</span>
+          </div>
+          <p class="comment-content">{{ comment.content }}</p>
+        </div>
+      </div>
+
+      <div class="comment-editor">
+        <el-input
+          v-model="commentText"
+          type="textarea"
+          :rows="3"
+          maxlength="2000"
+          show-word-limit
+          placeholder="说点什么吧…"
+        />
+        <el-button
+          type="primary"
+          class="comment-submit"
+          :loading="commentSubmitting"
+          :disabled="!commentText.trim()"
+          @click="submitComment"
+        >
+          发表
+        </el-button>
+        <p class="comment-hint">评论每天最多计入 10 条参与度（超出仍可发言，仅不计入统计）</p>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -596,5 +670,58 @@ onMounted(async () => {
 
 .full-width {
   width: 100%;
+}
+
+.comment-list {
+  min-height: 200px;
+}
+
+.comment-item {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.comment-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.comment-author {
+  font-size: 13px;
+  font-weight: 500;
+  color: #303133;
+}
+
+.comment-time {
+  font-size: 12px;
+  color: #c0c4cc;
+}
+
+.comment-content {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: #606266;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.comment-editor {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--app-border);
+}
+
+.comment-submit {
+  margin-top: 10px;
+  width: 100%;
+}
+
+.comment-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.6;
 }
 </style>
