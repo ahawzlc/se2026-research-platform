@@ -302,7 +302,10 @@ describe('AuthService.updatePassword（卡 A-补2）', () => {
       newPassword: 'NewPass1234',
     });
 
-    const savedHash = prisma.user.update.mock.calls[0][0].data.passwordHash;
+    const calls = prisma.user.update.mock.calls as unknown as Array<
+      [{ data: { passwordHash: string } }]
+    >;
+    const savedHash = calls[0][0].data.passwordHash;
     expect(savedHash).not.toBe(CORRECT_HASH);
     expect(await bcrypt.compare('NewPass1234', savedHash)).toBe(true);
     expect(result.token).toBe('token-abc');

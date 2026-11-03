@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
+import { PrismaService } from '../src/prisma/prisma.service';
 import { AppModule } from './../src/app.module';
 import { AllExceptionsFilter } from './../src/common/filters/all-exceptions.filter';
 import { TransformInterceptor } from './../src/common/interceptors/transform.interceptor';
@@ -25,9 +26,8 @@ interface TokenData {
 }
 
 interface MeData {
-  userId: string;
+  id: string;
   username: string;
-  roles: string[];
 }
 
 /**
@@ -40,7 +40,22 @@ describe('底座 (e2e)', () => {
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(PrismaService)
+      .useValue({
+        ping: jest.fn().mockResolvedValue(true),
+        user: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: 1n,
+            username: 'demo',
+            nickname: '演示',
+            email: '',
+            avatar: '',
+            createdAt: new Date('2026-11-01T00:00:00Z'),
+          }),
+        },
+      })
+      .compile();
 
     app = moduleFixture.createNestApplication();
     app.setGlobalPrefix(API_PREFIX);
@@ -96,7 +111,7 @@ describe('底座 (e2e)', () => {
       .expect(200);
     const meBody = envelope<MeData>(meRes);
     expect(meBody.code).toBe(0);
-    expect(meBody.data?.userId).toBe('1');
+    expect(meBody.data?.id).toBe('1');
     expect(meBody.data?.username).toBe('demo');
   });
 
