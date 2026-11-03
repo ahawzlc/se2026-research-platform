@@ -34,7 +34,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'projects',
         name: 'projects',
-        component: () => import('@/views/PlaceholderView.vue'),
+        component: () => import('@/views/ProjectsView.vue'),
         meta: { title: '项目管理', owner: 'B' }
       },
       {
@@ -42,6 +42,12 @@ const routes: RouteRecordRaw[] = [
         name: 'tasks',
         component: () => import('@/views/PlaceholderView.vue'),
         meta: { title: '任务看板', owner: 'B' }
+      },
+      {
+        path: 'gantt',
+        name: 'gantt',
+        component: () => import('@/views/GanttView.vue'),
+        meta: { title: '甘特图', owner: 'B' }
       },
       {
         path: 'literatures',

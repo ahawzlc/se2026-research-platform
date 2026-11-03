@@ -8,6 +8,7 @@ import { ActivityModule } from './activity/activity.module';
 import { AuthModule } from './auth/auth.module';
 import { TeamsModule } from './teams/teams.module';
 import { FileModule } from './modules/file/file.module';
+import { ProjectsModule } from './projects/projects.module';
 import { HealthController } from './health/health.controller';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 
@@ -25,6 +26,8 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
     AuthModule,
     TeamsModule,
     FileModule,
+    // B 线：项目与里程碑（B-1）
+    ProjectsModule,
   ],
   controllers: [HealthController],
   providers: [

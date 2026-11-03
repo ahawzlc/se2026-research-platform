@@ -80,6 +80,10 @@ export class BizException extends Error {
   static conflict(message = '数据已存在') {
     return new BizException(ErrorCode.CONFLICT, message);
   }
+
+  static internal(message = '服务异常，请稍后重试') {
+    return new BizException(ErrorCode.INTERNAL, message, 500);
+  }
 }
 
 export interface ApiResponse<T> {

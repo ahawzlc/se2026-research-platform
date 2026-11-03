@@ -23,6 +23,7 @@ const menuItems = [
   { path: '/dashboard', title: '工作台' },
   { path: '/projects', title: '项目管理' },
   { path: '/tasks', title: '任务看板' },
+  { path: '/gantt', title: '甘特图' },
   { path: '/literatures', title: '文献管理' },
   { path: '/meetings', title: '会议管理' },
   { path: '/achievements', title: '成果管理' },
