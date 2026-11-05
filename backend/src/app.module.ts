@@ -12,6 +12,7 @@ import { ProjectsModule } from './projects/projects.module';
 import { TasksModule } from './tasks/tasks.module';
 import { ConversationsModule } from './conversations/conversations.module';
 import { LiteraturesModule } from './literatures/literatures.module';
+import { MeetingsModule } from './meetings/meetings.module';
 import { HealthController } from './health/health.controller';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 
@@ -32,6 +33,7 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
     TasksModule,
     ConversationsModule,
     LiteraturesModule,
+    MeetingsModule,
   ],
   controllers: [HealthController],
   providers: [
