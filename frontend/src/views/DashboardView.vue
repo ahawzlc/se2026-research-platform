@@ -50,11 +50,11 @@ const modules: ModuleCard[] = [
     title: '文献与会议',
     owner: 'C',
     scope: '文献上传与标签、会议记录、从会议提取待办',
-    status: '进行中',
+    status: '已完成',
     tasks: [
       { name: 'C-4 上传底座', done: true },
-      { name: 'C-1 文献管理', done: false },
-      { name: 'C-2 会议记录', done: false }
+      { name: 'C-1 文献管理', done: true },
+      { name: 'C-2 会议记录', done: true }
     ]
   },
   {
@@ -91,7 +91,7 @@ const modules: ModuleCard[] = [
 ]
 
 const prerequisites = [
-  'C 线各写入点上线前，对照 docs/03 第九节自查埋点 ref 口径（task / 文献 / 成果 / 会议各有固定 refType；B-3 曾因评论埋点 ref 维度不符被判 invalid_ref，PR #14 已修并加回归）',
+  'C 线剩余写入点（C-3 成果、C-5 消息）上线前，对照 docs/03 第九节自查埋点 ref 口径（task / 文献 / 成果 / 会议各有固定 refType；B-3 曾因评论埋点 ref 维度不符被判 invalid_ref，PR #14 已修并加回归）',
   '消息轮询间隔存量冲突：SRS 写 30s、docs/01 写 3–5s，C-5 开工前须全组定（工程建议 30s）',
   'B-补1 项目概览、C-补1 逾期提醒两张补卡尚未建卡，先补卡再排期',
   '演示期 dev-token 仍开启（APP_ENABLE_DEV_TOKEN），正式验收前须关闭'
@@ -104,8 +104,8 @@ const prerequisites = [
       type="info"
       :closable="false"
       show-icon
-      title="进度快照 2026-11-04：A / B 主线与 C-4、D-1 已上线"
-      description="账号、项目任务全链路（含看板、甘特图、评论）与文件上传、参与度统计接口已部署；下一步主攻 C 线（文献 → 会议 → 成果）与 D-2 参与度画像。"
+      title="进度快照 2026-11-08：A / B 主线与 C-1/C-2/C-4、D-1 已上线"
+      description="账号、项目任务全链路（含看板、甘特图、评论）、文献与会议记录、文件上传与参与度统计接口已部署；下一步主攻 C-3 成果登记、C-5 会话消息与 D-2 参与度画像。"
     />
 
     <h2 class="section-title">模块进度</h2>
