@@ -65,11 +65,10 @@ export class ConversationsController {
     @Param('id') id: string,
     @Query() query: ListMessagesQueryDto,
   ) {
-    const limit = query.limit ? Number(query.limit) : undefined;
     return this.conversations.listConversationMessages(
       user.userId,
       id,
-      Number.isFinite(limit) ? limit : undefined,
+      query.limit,
     );
   }
 
