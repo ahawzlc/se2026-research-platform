@@ -1,13 +1,16 @@
 import { Module } from '@nestjs/common';
+import { ConversationsController } from './conversations.controller';
 import { ConversationsService } from './conversations.service';
 
 /**
- * 会话模块（统一会话模型的公共实现）。
+ * 会话模块（统一会话模型）。
  *
- * B 组的任务评论与 C 组的成果/会议评论都复用这里的锚定会话逻辑，
- * 因此单独成模块并导出服务。
+ * B-3 任务评论与 C-5 协作消息共用本模块：
+ *   - B-3 只注入 Service，复用锚定评论；
+ *   - C-5 额外注册 Controller，提供群组、私信、未读、已读接口。
  */
 @Module({
+  controllers: [ConversationsController],
   providers: [ConversationsService],
   exports: [ConversationsService],
 })
