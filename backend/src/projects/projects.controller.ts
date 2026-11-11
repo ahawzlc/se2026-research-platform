@@ -83,12 +83,12 @@ export class ProjectsController {
   // ---------------------------------------------------------------- 项目成员
 
   @Get(':id/members')
-  @ApiOperation({ summary: '项目成员列表' })
+  @ApiOperation({ summary: '项目成员列表（须为本课题组成员）' })
   listMembers(
     @CurrentUser() user: CurrentUserPayload,
     @Param('id') id: string,
   ) {
-    return this.projects.listMembers(id);
+    return this.projects.listMembers(user.userId, id);
   }
 
   @Post(':id/members')

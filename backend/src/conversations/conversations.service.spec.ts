@@ -128,13 +128,21 @@ describe('ConversationsService.sendConversationMessage', () => {
       .calls as unknown as Array<
       [
         {
-          where: { conversationId: bigint; userId: bigint };
+          where: {
+            conversationId: bigint;
+            userId: bigint;
+            deleted: number;
+          };
           data: { lastReadAt: Date };
         },
       ]
     >;
     expect(readCalls).toHaveLength(1);
-    expect(readCalls[0][0].where).toEqual({ conversationId: 5n, userId: 1n });
+    expect(readCalls[0][0].where).toEqual({
+      conversationId: 5n,
+      userId: 1n,
+      deleted: 0,
+    });
     expect(readCalls[0][0].data.lastReadAt).toBeInstanceOf(Date);
 
     // 零埋点：tx 里根本没有 activityLog

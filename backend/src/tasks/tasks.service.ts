@@ -125,7 +125,7 @@ export class TasksService {
   /** 创建任务：写 task_create 埋点 */
   async create(userId: string, dto: CreateTaskDto): Promise<TaskItem> {
     const project = await this.requireProject(dto.projectId, userId);
-    const assigneeId = this.resolveAssignee(dto.assigneeId);
+    const assigneeId = await this.resolveAssignee(dto.assigneeId, project.id);
 
     const task = await this.prisma.$transaction(async (tx) => {
       const created = await tx.task.create({
@@ -170,7 +170,7 @@ export class TasksService {
         ? undefined
         : dto.assigneeId === ''
           ? null
-          : this.resolveAssignee(dto.assigneeId);
+          : await this.resolveAssignee(dto.assigneeId, task.projectId);
 
     await this.prisma.task.update({
       where: { id: task.id },
@@ -386,13 +386,30 @@ export class TasksService {
   }
 
   /** 校验负责人属于本课题组；不传表示待认领 */
-  private resolveAssignee(assigneeIdParam?: string): bigint | null {
+  private async resolveAssignee(
+    assigneeIdParam: string | undefined,
+    projectId: bigint,
+  ): Promise<bigint | null> {
     if (!assigneeIdParam) {
       return null;
     }
     const assigneeId = parseId(assigneeIdParam);
     if (assigneeId === null) {
       throw BizException.param('assigneeId 非法');
+    }
+    // 调用前均已过 requireProject，项目必然存在
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, deleted: 0 },
+      select: { teamId: true },
+    });
+    if (project) {
+      const member = await this.prisma.teamMember.findFirst({
+        where: { teamId: project.teamId, userId: assigneeId, deleted: 0 },
+        select: { id: true },
+      });
+      if (!member) {
+        throw BizException.param('负责人必须是本课题组成员');
+      }
     }
     return assigneeId;
   }
