@@ -183,13 +183,13 @@ export class ProjectsService {
     });
   }
 
-  /** 项目成员列表 */
-  async listMembers(projectIdParam: string): Promise<ProjectMemberItem[]> {
-    const projectId = parseId(projectIdParam);
-    if (projectId === null) {
-      throw BizException.notFound('项目不存在');
-    }
-    return this.listMembersById(projectId);
+  /** 项目成员列表：须为项目所属课题组成员（红线 9） */
+  async listMembers(
+    userId: string,
+    projectIdParam: string,
+  ): Promise<ProjectMemberItem[]> {
+    const project = await this.requireProject(projectIdParam, userId);
+    return this.listMembersById(project.id);
   }
 
   /** 按主键取项目成员列表（内部用） */

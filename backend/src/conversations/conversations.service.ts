@@ -380,7 +380,7 @@ export class ConversationsService {
 
       // 发送者自己肯定已读，推进已读位点，避免自己给自己算未读
       await tx.conversationMember.updateMany({
-        where: { conversationId, userId: senderId },
+        where: { conversationId, userId: senderId, deleted: 0 },
         data: { lastReadAt: new Date() },
       });
 
