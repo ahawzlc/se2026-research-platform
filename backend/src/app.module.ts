@@ -15,6 +15,7 @@ import { LiteraturesModule } from './literatures/literatures.module';
 import { MeetingsModule } from './meetings/meetings.module';
 import { HealthController } from './health/health.controller';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
+import { AchievementsModule } from './achievements/achievements.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
     ConversationsModule,
     LiteraturesModule,
     MeetingsModule,
+    AchievementsModule,
   ],
   controllers: [HealthController],
   providers: [
