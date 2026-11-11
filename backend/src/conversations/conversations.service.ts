@@ -412,23 +412,25 @@ export class ConversationsService {
       },
     });
 
-    const items: UnreadItem[] = [];
-    for (const row of memberships) {
-      const count = await this.prisma.message.count({
-        where: {
-          conversationId: row.conversationId,
-          deleted: 0,
-          ...(row.lastReadAt ? { createdAt: { gt: row.lastReadAt } } : {}),
-        },
-      });
-      if (count > 0) {
-        items.push({
-          conversationId: toIdString(row.conversationId),
-          unreadCount: count,
-        });
-      }
-    }
-    return items;
+    // 逐会话 count 并行发出（各会话 lastReadAt 不同，无法合并为一次 groupBy）
+    const counts = await Promise.all(
+      memberships.map((row) =>
+        this.prisma.message.count({
+          where: {
+            conversationId: row.conversationId,
+            deleted: 0,
+            ...(row.lastReadAt ? { createdAt: { gt: row.lastReadAt } } : {}),
+          },
+        }),
+      ),
+    );
+
+    return memberships
+      .map((row, i) => ({
+        conversationId: toIdString(row.conversationId),
+        unreadCount: counts[i],
+      }))
+      .filter((item) => item.unreadCount > 0);
   }
 
   /** 标记已读：把当前用户的 lastReadAt 推进到当前时间 */
@@ -485,19 +487,21 @@ export class ConversationsService {
   }): Promise<ConversationItem> {
     const lastReadAt = row.members[0]?.lastReadAt ?? null;
 
-    const lastMessage = await this.prisma.message.findFirst({
-      where: { conversationId: row.id, deleted: 0 },
-      orderBy: { id: 'desc' },
-      select: { content: true, msgType: true, createdAt: true },
-    });
-
-    const unreadCount = await this.prisma.message.count({
-      where: {
-        conversationId: row.id,
-        deleted: 0,
-        ...(lastReadAt ? { createdAt: { gt: lastReadAt } } : {}),
-      },
-    });
+    // 最后一条消息与未读数互不依赖，并行查询摊平 N+1 延迟
+    const [lastMessage, unreadCount] = await Promise.all([
+      this.prisma.message.findFirst({
+        where: { conversationId: row.id, deleted: 0 },
+        orderBy: { id: 'desc' },
+        select: { content: true, msgType: true, createdAt: true },
+      }),
+      this.prisma.message.count({
+        where: {
+          conversationId: row.id,
+          deleted: 0,
+          ...(lastReadAt ? { createdAt: { gt: lastReadAt } } : {}),
+        },
+      }),
+    ]);
 
     return {
       id: toIdString(row.id),

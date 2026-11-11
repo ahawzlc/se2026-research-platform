@@ -1,4 +1,13 @@
-import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Max,
+  MaxLength,
+  Min,
+} from 'class-validator';
+import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 /** 创建/获取项目讨论区入参 */
@@ -28,8 +37,11 @@ export class SendMessageDto {
 
 /** 拉取消息查询参数 */
 export class ListMessagesQueryDto {
-  @ApiPropertyOptional({ description: '最多返回条数', default: 50 })
+  @ApiPropertyOptional({ description: '最多返回条数，1-200', default: 50 })
   @IsOptional()
-  @IsString()
-  limit?: string;
+  @Type(() => Number)
+  @IsInt({ message: 'limit 需为整数' })
+  @Min(1, { message: 'limit 最小为 1' })
+  @Max(200, { message: 'limit 最大为 200' })
+  limit?: number;
 }

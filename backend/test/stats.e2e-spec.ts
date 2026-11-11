@@ -1,7 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
-import type { App } from 'supertest/types';
 import type { analyze } from '../src/activity/analysis/participation';
 import { AppModule } from '../src/app.module';
 import { AuthService } from '../src/auth/auth.service';
@@ -14,6 +13,7 @@ import { LOG_LIMIT } from '../src/activity/analysis/participation';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
+import type { Server } from 'node:http';
 
 type StatsData = ReturnType<typeof analyze> & {
   teamId: string;
@@ -48,14 +48,14 @@ const event = (id: bigint, type = 'task_create', refType = 'task') => ({
 });
 
 describe('D-1 HTTP 验收（真实 JWT/DTO/服务，替身数据库）', () => {
-  let app: INestApplication<App>;
+  let app: INestApplication;
   let token: string;
   beforeAll(async () => {
     const module = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(PrismaService)
       .useValue({ $transaction: transaction })
       .compile();
-    app = module.createNestApplication<App>();
+    app = module.createNestApplication();
     app.setGlobalPrefix('api/v1');
     app.useGlobalPipes(
       new ValidationPipe({
@@ -83,8 +83,9 @@ describe('D-1 HTTP 验收（真实 JWT/DTO/服务，替身数据库）', () => {
   afterAll(async () => {
     await app.close();
   });
+  // getHttpServer() 在 Nest 类型里返回 any，断言成 http.Server 供 supertest 使用
   const get = (path: string) =>
-    request(app.getHttpServer())
+    request(app.getHttpServer() as Server)
       .get(`/api/v1/stats/contribution${path}`)
       .set('Authorization', `Bearer ${token}`);
   it('独立只读 smoke 脚本通过实际 HTTP socket 验收', async () => {
@@ -104,10 +105,10 @@ describe('D-1 HTTP 验收（真实 JWT/DTO/服务，替身数据库）', () => {
     expect(stdout).not.toContain(token);
   });
   it('未登录/伪造令牌 401，不读数据库', async () => {
-    await request(app.getHttpServer())
+    await request(app.getHttpServer() as Server)
       .get('/api/v1/stats/contribution?teamId=8')
       .expect(401);
-    await request(app.getHttpServer())
+    await request(app.getHttpServer() as Server)
       .get('/api/v1/stats/contribution/details?teamId=8')
       .set('Authorization', 'Bearer fake')
       .expect(401);

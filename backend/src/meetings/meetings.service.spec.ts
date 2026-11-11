@@ -89,7 +89,7 @@ function createService() {
     },
     teamMember: {
       findFirst: jest.fn<Promise<unknown>, [unknown]>(),
-      findMany: jest.fn<Promise<Array<{ userId: bigint }>, [unknown]>>(),
+      findMany: jest.fn<Promise<Array<{ userId: bigint }>>, [unknown]>(),
     },
     $transaction: jest.fn((fn: (client: typeof tx) => Promise<unknown>) =>
       fn(tx),
