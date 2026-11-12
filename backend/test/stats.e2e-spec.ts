@@ -202,6 +202,44 @@ describe('D-1 HTTP 验收（真实 JWT/DTO/服务，替身数据库）', () => {
       payload(await get('/details?teamId=8&page=3&size=1')).data.list,
     ).toEqual([]);
   });
+  it('周下钻保留全历史去重，且仅为当前页查询同组来源', async () => {
+    tx.activityLog.findMany.mockResolvedValue([
+      event(1n),
+      { ...event(2n), refId: 1n, createdAt: new Date('2026-11-09T01:00:00Z') },
+    ]);
+    tx.task.findMany.mockResolvedValue([
+      { id: 1n, projectId: 12n, title: '同组任务' },
+    ]);
+    const res = await get(
+      '/details?teamId=8&dimension=task&weekStart=2026-11-09',
+    ).expect(200);
+    expect(payload(res).data).toMatchObject({
+      total: 1,
+      list: [
+        {
+          id: '2',
+          reason: 'duplicate',
+          source: {
+            kind: 'task',
+            id: '1',
+            projectId: '12',
+            title: '同组任务',
+          },
+        },
+      ],
+    });
+    expect(tx.task.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: { in: [1n] },
+          deleted: 0,
+          project: { teamId: 8n, deleted: 0 },
+        },
+      }),
+    );
+    await get('/details?teamId=8&weekStart=2026-11-10').expect(400);
+    await get('/details?teamId=8&weekStart=2026-02-30').expect(400);
+  });
   it('空样本不给 0 分', async () => {
     tx.activityLog.findMany.mockResolvedValue([]);
     expect(payload(await get('?teamId=8')).data).toMatchObject({
