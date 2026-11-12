@@ -58,6 +58,7 @@ instance.interceptors.response.use(
     return Promise.reject(new Error(body.message || `业务异常：${body.code}`))
   },
   (error) => {
+    if (axios.isCancel(error)) return Promise.reject(error)
     const status = error?.response?.status
     if (status === 401) {
       handleUnauthorized()

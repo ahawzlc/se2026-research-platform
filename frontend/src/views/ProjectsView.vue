@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { projectsApi, teamsApi } from '@/api'
@@ -23,6 +24,7 @@ const STATUS_META: Record<ProjectStatus, { label: string; type: 'info' | 'primar
 
 // ---------------------------------------------------------------- 列表
 
+const route = useRoute()
 const projects = ref<ProjectItem[]>([])
 const total = ref(0)
 const page = ref(1)
@@ -370,6 +372,9 @@ async function handleRemoveMember(member: ProjectMemberItem): Promise<void> {
 onMounted(async () => {
   teams.value = await teamsApi.fetchMyTeams()
   await loadProjects()
+  const projectId = route.query.projectId
+  if (typeof projectId === 'string' && typeof route.query.milestoneId === 'string')
+    await openMilestones(projectId).catch(() => { milestoneVisible.value = false })
 })
 </script>
 
@@ -522,6 +527,10 @@ onMounted(async () => {
           <el-descriptions-item label="简介">{{ detail.description || '暂无' }}</el-descriptions-item>
           <el-descriptions-item label="创建时间">{{ detail.createdAt }}</el-descriptions-item>
         </el-descriptions>
+        <el-button link type="primary" class="drawer-title"
+          @click="$router.push({ name: 'contribution', query: { teamId: detail.teamId } })">
+          查看课题组参与度
+        </el-button>
 
         <h4 class="drawer-title">项目成员</h4>
         <el-empty v-if="detail.members.length === 0" description="暂无成员" :image-size="60" />
@@ -539,7 +548,8 @@ onMounted(async () => {
       <div class="milestone-toolbar">
         <el-button type="primary" @click="openMilestoneCreate">新建里程碑</el-button>
       </div>
-      <el-table v-loading="milestoneLoading" :data="milestones">
+      <el-table v-loading="milestoneLoading" :data="milestones"
+        :row-class-name="({ row }: { row: MilestoneItem }) => row.id === route.query.milestoneId ? 'milestone-linked' : ''">
         <el-table-column label="名称" prop="name" min-width="160" />
         <el-table-column label="截止日期" width="120">
           <template #default="{ row }">{{ row.dueDate || '未定' }}</template>
@@ -634,6 +644,7 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+:deep(.milestone-linked) { --el-table-tr-bg-color: var(--el-color-primary-light-9); }
 .toolbar {
   display: flex;
   gap: 10px;

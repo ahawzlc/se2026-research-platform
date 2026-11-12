@@ -220,14 +220,17 @@ export class TasksService {
       return this.detail(userId, taskIdParam);
     }
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.task.update({
-        where: { id: task.id },
+    const changed = await this.prisma.$transaction(async (tx) => {
+      // 同一旧状态只能由一个请求成功切换并写入流水。
+      const result = await tx.task.updateMany({
+        where: { id: task.id, status: task.status, deleted: 0 },
         data: {
           status: dto.status,
           sortOrder: await this.nextSortOrder(tx, task.projectId, dto.status),
         },
       });
+
+      if (result.count === 0) return false;
 
       if (dto.status === 'done') {
         // 同对象去重：反复把同一个任务拖到 done 只计一次分
@@ -239,17 +242,21 @@ export class TasksService {
           refId: task.id,
         });
       } else if (task.status === 'done') {
-        // 反向行为扣减：从 done 退回其它状态，撤销那条 task_done
+        // 退回由任意成员操作，撤销的是任务原完成人的记录。
         await this.activity.revoke(tx, {
-          userId,
+          teamId: project.teamId,
           type: ActivityType.TASK_DONE,
           refType: 'task',
           refId: task.id,
         });
       }
+      return true;
     });
 
-    return this.detail(userId, taskIdParam);
+    const current = await this.detail(userId, taskIdParam);
+    if (!changed && current.status !== dto.status)
+      throw BizException.conflict('任务状态已更新，请刷新后重试');
+    return current;
   }
 
   /**

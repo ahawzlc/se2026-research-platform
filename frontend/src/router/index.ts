@@ -70,7 +70,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'contribution',
         name: 'contribution',
-        component: () => import('@/views/PlaceholderView.vue'),
+        component: () => import('@/views/ParticipationView.vue'),
         meta: { title: '参与度分析', owner: 'D' }
       },
       {

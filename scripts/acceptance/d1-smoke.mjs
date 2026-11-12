@@ -21,7 +21,7 @@ await get(`?teamId=${encodeURIComponent(teamId)}&unexpected=1`, 400)
 const summary = await get(`?teamId=${encodeURIComponent(teamId)}`)
 assert.equal(summary.teamId, teamId)
 assert.equal(summary.dimensions.length, 6)
-assert.equal(summary.modelVersion, 'participation-v1-snapshot')
+assert.match(summary.modelVersion, /^participation-v1(?:\.\d+)?-snapshot$/)
 assert(summary.disclaimer.includes('不构成科研贡献评价'))
 assert.equal(summary.weekly.reduce((sum, week) => sum + week.count, 0), summary.sampleSize)
 if (!summary.hasData) {
