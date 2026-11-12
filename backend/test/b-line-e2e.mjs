@@ -333,6 +333,18 @@ async function main() {
   const logsIdem = await countLogs(tokenA, 'task_done')
   ok('反复拖到 done 不重复计分（幂等）', logsIdem === 1, `实际 ${logsIdem}`)
 
+  const handoff = await api(`/tasks/${taskId}/status`, {
+    method: 'PUT', token: tokenB, body: { status: 'doing' }
+  })
+  ok('另一成员退回任务时撤销原完成者的埋点',
+    handoff.code === 0 && await countLogs(tokenA, 'task_done') === 0)
+  const handoffDone = await api(`/tasks/${taskId}/status`, {
+    method: 'PUT', token: tokenB, body: { status: 'done' }
+  })
+  ok('交接完成后只有新完成者的记录有效',
+    handoffDone.code === 0 && await countLogs(tokenA, 'task_done') === 0 &&
+    await countLogs(tokenB, 'task_done') === 1)
+
   // 排序持久化
   const t2 = await api('/tasks', {
     method: 'POST',
