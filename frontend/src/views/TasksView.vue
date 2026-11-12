@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import draggable from 'vuedraggable'
+import { useRoute } from 'vue-router'
 import { projectsApi, tasksApi, teamsApi } from '@/api'
 import type { ProjectItem } from '@/api/projects'
 import type { TaskItem, TaskPriority, TaskStatus } from '@/api/tasks'
@@ -24,6 +25,7 @@ const PRIORITY_META: Record<TaskPriority, { label: string; type: 'danger' | 'war
 
 // ---------------------------------------------------------------- 数据
 
+const route = useRoute()
 const projects = ref<ProjectItem[]>([])
 const currentProjectId = ref('')
 const tasks = ref<TaskItem[]>([])
@@ -60,9 +62,15 @@ function groupTasks(list: TaskItem[]): Record<TaskStatus, TaskItem[]> {
   return grouped
 }
 
-async function loadProjects(): Promise<void> {
+async function loadProjects(preferred?: TaskItem): Promise<void> {
   const result = await projectsApi.fetchProjects({ page: 1, size: 100 })
   projects.value = result.list
+  if (preferred) {
+    if (!projects.value.some(project => project.id === preferred.projectId))
+      projects.value.push(await projectsApi.fetchProject(preferred.projectId))
+    currentProjectId.value = preferred.projectId
+    return
+  }
   if (!projects.value.some((p) => p.id === currentProjectId.value)) {
     currentProjectId.value = projects.value[0]?.id ?? ''
   }
@@ -357,9 +365,12 @@ watch(currentProjectId, () => {
 })
 
 onMounted(async () => {
-  await loadProjects()
-  await loadTasks()
-  await loadMembers()
+  const taskId = typeof route.query.taskId === 'string' ? route.query.taskId : ''
+  const task = taskId ? await tasksApi.fetchTask(taskId).catch(() => undefined) : undefined
+  await loadProjects(task)
+  if (!task) return
+  if (route.query.comments === '1') void openComments(task)
+  else openEdit(task)
 })
 </script>
 
