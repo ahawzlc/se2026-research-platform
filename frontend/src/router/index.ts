@@ -64,7 +64,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'achievements',
         name: 'achievements',
-        component: () => import('@/views/PlaceholderView.vue'),
+        component: () => import('@/views/AchievementsView.vue'),
         meta: { title: '成果管理', owner: 'C' }
       },
       {
