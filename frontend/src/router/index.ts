@@ -58,7 +58,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'meetings',
         name: 'meetings',
-        component: () => import('@/views/PlaceholderView.vue'),
+        component: () => import('@/views/MeetingsView.vue'),
         meta: { title: '会议管理', owner: 'C' }
       },
       {
