@@ -30,7 +30,8 @@ const modules: ModuleCard[] = [
       { name: 'A-1 注册/登录', done: true },
       { name: 'A-2 课题组与角色', done: true },
       { name: 'A-补1 个人资料', done: true },
-      { name: 'A-补2 修改密码', done: true }
+      { name: 'A-补2 修改密码', done: true },
+      { name: '资料/改密前端入口·待补', done: false }
     ]
   },
   {
@@ -54,27 +55,30 @@ const modules: ModuleCard[] = [
     tasks: [
       { name: 'C-4 上传底座', done: true },
       { name: 'C-1 文献管理', done: true },
-      { name: 'C-2 会议记录', done: true }
+      { name: 'C-2 会议记录', done: true },
+      { name: 'C-1/C-2 前端页面·待开发', done: false }
     ]
   },
   {
     title: '成果管理',
     owner: 'C',
     scope: '成果分类登记、附件上传、成员关联',
-    status: '待开工',
+    status: '已完成',
     tasks: [
       { name: '附件底座 C-4', done: true },
-      { name: 'C-3 成果登记', done: false }
+      { name: 'C-3 成果登记', done: true },
+      { name: 'C-3 前端页面·待开发', done: false }
     ]
   },
   {
     title: '协作沟通',
     owner: 'B / C',
-    scope: '上下文评论、项目讨论区、未读数轮询',
-    status: '待开工',
+    scope: '会话列表、群组私信、未读汇总与已读',
+    status: '已完成',
     tasks: [
       { name: '任务评论·随 B-3', done: true },
-      { name: 'C-5 会话消息·弹性', done: false }
+      { name: 'C-5 会话消息', done: true },
+      { name: 'C-5 前端页面·待开发', done: false }
     ]
   },
   {
@@ -84,17 +88,18 @@ const modules: ModuleCard[] = [
     status: '进行中',
     tasks: [
       { name: 'D-1 统计接口', done: true },
-      { name: 'D-2 画像可视化', done: false },
+      { name: 'D-2 画像可视化', done: true },
       { name: '权重校准', done: false }
     ]
   }
 ]
 
 const prerequisites = [
-  'C-3 成果上线前，对照 docs/03 第九节自查埋点 ref 口径（成果有固定 refType；B-3 曾因评论埋点 ref 维度不符被判 invalid_ref，PR #14 已修并加回归；C-5 消息零埋点，无需自查）',
-  '消息轮询间隔存量冲突：SRS 写 30s、docs/01 写 3–5s，C-5 开工前须全组定（工程建议 30s）',
+  'C 线四个模块（文献/会议/成果/消息）与 A-补1/补2 的前端页面尚未开发——后端接口已全部合并部署，以 docs/01 冻结口径为准',
   'B-补1 项目概览、C-补1 逾期提醒两张补卡尚未建卡，先补卡再排期',
-  '演示期 dev-token 仍开启（APP_ENABLE_DEV_TOKEN），正式验收前须关闭'
+  '权重校准待真实使用样本：跑 scripts/acceptance/d-calibration.mjs，校准前后对比写回 docs/03',
+  '演示期 dev-token 仍开启（APP_ENABLE_DEV_TOKEN），正式验收/公网暴露前须关闭',
+  '第 8 周收尾：全链路联调、性能与异常兜底、答辩材料与 v1.0 tag'
 ]
 </script>
 
@@ -104,8 +109,8 @@ const prerequisites = [
       type="info"
       :closable="false"
       show-icon
-      title="进度快照 2026-11-08：A / B 主线与 C-1/C-2/C-4、D-1 已上线"
-      description="账号、项目任务全链路（含看板、甘特图、评论）、文献与会议记录、文件上传与参与度统计接口已部署；下一步主攻 C-3 成果登记、C-5 会话消息与 D-2 参与度画像。"
+      title="进度快照 2026-11-16：A / B / C / D 四线后端全部上线"
+      description="账号、项目任务（看板/甘特图/评论）、文献、会议、成果登记、协作消息、参与度统计与画像接口均已部署；下一步主攻 C 线与 A-补卡的前端页面、权重校准和第 8 周答辩收尾。"
     />
 
     <h2 class="section-title">模块进度</h2>
