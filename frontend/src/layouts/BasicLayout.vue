@@ -44,7 +44,10 @@ function handleCommand(command: string): void {
 </script>
 
 <template>
-  <el-container class="app-layout">
+  <el-container
+    class="app-layout"
+    :class="{ 'participation-layout': route.name === 'contribution' }"
+  >
     <el-aside width="var(--app-aside-width)" class="app-aside">
       <div class="app-brand">科研协作平台</div>
       <el-menu :default-active="activeMenu" router class="app-menu">
@@ -124,5 +127,31 @@ function handleCommand(command: string): void {
 .app-main {
   padding: 16px;
   overflow-y: auto;
+}
+@media (max-width: 720px) {
+  .participation-layout {
+    flex-direction: column;
+  }
+  .participation-layout .app-aside {
+    width: 100%;
+    border-right: 0;
+    border-bottom: 1px solid var(--app-border);
+  }
+  .participation-layout .app-brand {
+    height: 38px;
+    padding: 0 12px;
+  }
+  .participation-layout .app-menu {
+    display: flex;
+    overflow-x: auto;
+  }
+  .participation-layout .app-menu :deep(.el-menu-item) {
+    flex: none;
+    height: 40px;
+    padding: 0 12px;
+  }
+  .participation-layout .app-main {
+    padding: 10px;
+  }
 }
 </style>

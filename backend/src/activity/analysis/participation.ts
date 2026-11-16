@@ -5,7 +5,7 @@ import {
 } from '../activity.constants';
 import { formatDateTime } from '../../common/datetime';
 
-export const MODEL_VERSION = 'participation-v1-snapshot';
+export const MODEL_VERSION = 'participation-v1.1-snapshot';
 export const SAMPLE_THRESHOLD = 20;
 export const LOG_LIMIT = 50000;
 export const DISCLAIMER =
@@ -62,18 +62,25 @@ export interface Member {
   nickname: string;
 }
 
+/** 由已转换为北京时间的日期取所在周的周一。 */
+export function weekOf(dateText: string): string {
+  const date = new Date(`${dateText.slice(0, 10)}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - ((date.getUTCDay() + 6) % 7));
+  return date.toISOString().slice(0, 10);
+}
+
 /** 输入须为同一团队、当前有效成员的流水，按发生时间/id 稳定排序。 */
-export function analyze(
+export function evaluateActivities(
   rows: ActivityRow[],
-  members: Member[],
   doneTasks: Set<string>,
   comments: Set<string>,
 ) {
   const seen = new Set<string>();
   const daily = new Map<string, number>();
-  const details = rows.map((row) => {
+  return rows.map((row) => {
     const userId = String(row.userId);
     const dimension = DIMENSIONS.find((d) => d.types.includes(row.type));
+    const originalWeight = row.weight.toString();
     let reason = 'counted';
     const key = JSON.stringify([
       userId,
@@ -81,7 +88,8 @@ export function analyze(
       row.refType,
       String(row.refId),
     ]);
-    const dayKey = `${userId}/${row.type}/${formatDateTime(row.createdAt).slice(0, 10)}`;
+    const createdAt = formatDateTime(row.createdAt);
+    const dayKey = `${userId}/${row.type}/${createdAt.slice(0, 10)}`;
     if (!dimension) reason = 'unknown_type';
     else if (
       row.refId === null ||
@@ -89,6 +97,8 @@ export function analyze(
       row.refType !== dimension.ref
     )
       reason = 'invalid_ref';
+    // 业务撤销会把权重置零，撤销行不能占用去重键或每日额度。
+    else if (Number(originalWeight) <= 0) reason = 'revoked';
     else if (seen.has(key)) reason = 'duplicate';
     else {
       seen.add(key);
@@ -112,9 +122,9 @@ export function analyze(
       type: row.type,
       refType: row.refType,
       refId: row.refId === null ? null : String(row.refId),
-      createdAt: formatDateTime(row.createdAt),
+      createdAt,
       dimension: dimension?.key ?? null,
-      originalWeight: row.weight.toString(),
+      originalWeight,
       counted: reason === 'counted',
       reason,
       countedWeight:
@@ -123,6 +133,15 @@ export function analyze(
           : 0,
     };
   });
+}
+
+export function analyze(
+  rows: ActivityRow[],
+  members: Member[],
+  doneTasks: Set<string>,
+  comments: Set<string>,
+) {
+  const details = evaluateActivities(rows, doneTasks, comments);
   const counted = details.filter((d) => d.counted);
   const raw = new Map<string, number>();
   const active = new Set<string>();
@@ -135,9 +154,7 @@ export function analyze(
     raw.set(key, (raw.get(key) ?? 0) + detail.countedWeight);
     active.add(detail.userId);
     // 这里的日期已是北京时间墙钟；UTC 运算仅用于求同一日历的周一。
-    const date = new Date(`${detail.createdAt.slice(0, 10)}T00:00:00Z`);
-    date.setUTCDate(date.getUTCDate() - ((date.getUTCDay() + 6) % 7));
-    const weekStart = date.toISOString().slice(0, 10);
+    const weekStart = weekOf(detail.createdAt);
     const week = weeks.get(weekStart) ?? { weekStart, count: 0, weight: 0 };
     week.count++;
     week.weight += detail.countedWeight;
@@ -157,6 +174,7 @@ export function analyze(
     modelVersion: MODEL_VERSION,
     disclaimer: DISCLAIMER,
     hasData: counted.length > 0,
+    memberCount: members.length,
     sampleSize: counted.length,
     sampleThreshold: SAMPLE_THRESHOLD,
     insufficientSample: counted.length < SAMPLE_THRESHOLD,

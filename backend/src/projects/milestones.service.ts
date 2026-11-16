@@ -62,18 +62,26 @@ export class MilestonesService {
     dto: CreateMilestoneDto,
   ): Promise<MilestoneItem> {
     const project = await this.projects.requireProject(dto.projectId, userId);
-    const row = await this.prisma.milestone.create({
-      data: {
-        projectId: project.id,
-        name: dto.name,
-        dueDate: dto.dueDate ? toDate(dto.dueDate) : null,
-        status: dto.status ?? 'pending',
-      },
+    const row = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.milestone.create({
+        data: {
+          projectId: project.id,
+          name: dto.name,
+          dueDate: dto.dueDate ? toDate(dto.dueDate) : null,
+          status: dto.status ?? 'pending',
+        },
+      });
+      if (created.status === 'done') {
+        await this.activity.recordInTransaction(tx, {
+          userId,
+          teamId: project.teamId,
+          type: ActivityType.MILESTONE_DONE,
+          refType: 'milestone',
+          refId: created.id,
+        });
+      }
+      return created;
     });
-    // 直接以 done 状态创建时也算一次达成
-    if (row.status === 'done') {
-      await this.recordMilestoneDone(userId, project.teamId, row.id);
-    }
     return this.toItem(row);
   }
 
@@ -87,11 +95,21 @@ export class MilestonesService {
       milestoneIdParam,
       userId,
     );
+    if (
+      dto.status === undefined &&
+      dto.name === undefined &&
+      dto.dueDate === undefined
+    )
+      return this.toItem(milestone);
     const nextStatus = dto.status ?? milestone.status;
 
     const updated = await this.prisma.$transaction(async (tx) => {
-      const row = await tx.milestone.update({
-        where: { id: milestone.id },
+      const result = await tx.milestone.updateMany({
+        where: {
+          id: milestone.id,
+          deleted: 0,
+          ...(dto.status !== undefined ? { status: milestone.status } : {}),
+        },
         data: {
           ...(dto.name !== undefined ? { name: dto.name } : {}),
           ...(dto.dueDate !== undefined
@@ -101,6 +119,8 @@ export class MilestonesService {
         },
       });
 
+      if (result.count === 0) return null;
+
       // 埋点与业务写入同事务（docs/03 第二节要求）
       if (nextStatus === 'done' && milestone.status !== 'done') {
         await this.activity.recordOnce(tx, {
@@ -108,20 +128,31 @@ export class MilestonesService {
           teamId: project.teamId,
           type: ActivityType.MILESTONE_DONE,
           refType: 'milestone',
-          refId: row.id,
+          refId: milestone.id,
         });
       } else if (nextStatus !== 'done' && milestone.status === 'done') {
         await this.activity.revoke(tx, {
-          userId,
+          teamId: project.teamId,
           type: ActivityType.MILESTONE_DONE,
           refType: 'milestone',
-          refId: row.id,
+          refId: milestone.id,
         });
       }
-      return row;
+      return tx.milestone.findUniqueOrThrow({ where: { id: milestone.id } });
     });
 
-    return this.toItem(updated);
+    if (updated) return this.toItem(updated);
+    const { milestone: current } = await this.requireMilestone(
+      milestoneIdParam,
+      userId,
+    );
+    if (
+      dto.status === current.status &&
+      dto.name === undefined &&
+      dto.dueDate === undefined
+    )
+      return this.toItem(current);
+    throw BizException.conflict('里程碑已更新，请刷新后重试');
   }
 
   /** 删除里程碑（逻辑删除）；已完成的里程碑撤销其埋点 */
@@ -135,16 +166,13 @@ export class MilestonesService {
         where: { id: milestone.id },
         data: { deleted: 1 },
       });
-      if (milestone.status === 'done') {
-        await this.activity.revoke(tx, {
-          userId,
-          type: ActivityType.MILESTONE_DONE,
-          refType: 'milestone',
-          refId: milestone.id,
-        });
-      }
+      await this.activity.revoke(tx, {
+        teamId: project.teamId,
+        type: ActivityType.MILESTONE_DONE,
+        refType: 'milestone',
+        refId: milestone.id,
+      });
     });
-    void project;
   }
 
   // ---------------------------------------------------------------- 内部
@@ -178,20 +206,6 @@ export class MilestonesService {
   }
 
   /** 里程碑达成的埋点（同对象只记一次） */
-  private async recordMilestoneDone(
-    userId: string,
-    teamId: bigint,
-    milestoneId: bigint,
-  ): Promise<void> {
-    await this.activity.recordOnce(this.prisma, {
-      userId,
-      teamId,
-      type: ActivityType.MILESTONE_DONE,
-      refType: 'milestone',
-      refId: milestoneId,
-    });
-  }
-
   private toItem(row: MilestoneRow): MilestoneItem {
     return {
       id: toIdString(row.id),

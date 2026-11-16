@@ -19,6 +19,11 @@ export class DetailsQuery extends StatsQuery {
   @IsIn(DIMENSIONS.map((d) => d.key))
   dimension?: string;
 
+  @ApiPropertyOptional({ description: '北京时间周一，yyyy-MM-dd' })
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
+  weekStart?: string;
+
   @ApiPropertyOptional({ default: 1 })
   @Type(() => Number)
   @IsInt()

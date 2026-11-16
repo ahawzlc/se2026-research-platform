@@ -83,6 +83,26 @@ describe('参与度口径', () => {
     expect(run(rows).sampleSize).toBe(0);
     expect(run(rows, new Set(['1'])).sampleSize).toBe(1);
   });
+  it.each([
+    ['task_done', 'task'],
+    ['milestone_done', 'milestone'],
+    ['literature_read', 'literature'],
+    ['meeting_attend', 'meeting'],
+  ])('%s 撤销不计入，重新写入后按新记录所在周计入一次', (type, ref) => {
+    const revoked = { ...row(1, type, ref), weight: '0.00' };
+    const restored = {
+      ...row(2, type, ref, 1, '2026-11-09T00:00:00Z'),
+      refId: 1n,
+    };
+    expect(run([revoked], new Set(['1'])).sampleSize).toBe(0);
+    const result = run([revoked, restored], new Set(['1']));
+    expect(result.details.map((event) => event.reason)).toEqual([
+      'revoked',
+      'counted',
+    ]);
+    expect(result.sampleSize).toBe(1);
+    expect(result.weekly.map((week) => week.weekStart)).toEqual(['2026-11-09']);
+  });
   it('评论同日上限 10，跨北京时间午夜重置；周日/周一边界正确', () => {
     const rows = Array.from({ length: 11 }, (_, i) =>
       row(i + 1, 'comment_create', 'message', 1, '2026-11-01T15:59:59Z'),

@@ -19,7 +19,7 @@ export interface RecordActivityInput {
 export type PrismaTransactionClient = Prisma.TransactionClient;
 
 /**
- * 埋点写入服务。activity_log 只增不改，任何业务写操作都应留下痕迹。
+ * 埋点写入服务。业务动作追加流水，撤销只将关联流水的权重置零。
  */
 @Injectable()
 export class ActivityService {
@@ -116,25 +116,28 @@ export class ActivityService {
    * 背景（docs/03 第六节第 3 条）：任务从 done 退回 doing 时，
    * 之前记的那条 task_done 不该继续计入。
    *
-   * activity_log 本身是「只增不改」的流水表，所以这里**不删行**，
-   * 而是把该行的权重置为 0 —— 流水保留（可追溯到「曾经完成过又撤回」），
-   * 但不再参与统计累加。
+   * 团队共享状态（任务/里程碑）按团队和对象撤销原完成记录，
+   * 个人行为（阅读/参会）仍按行为人和对象撤销。保留流水，权重置为 0。
    *
    * @returns true 表示确实撤销了一条
    */
   async revoke(
     client: PrismaTransactionClient | PrismaService,
     input: {
-      userId: bigint | number | string;
       type: ActivityTypeValue;
       refType?: string | null;
       refId: bigint | number | string;
-    },
+    } & (
+      | { userId: bigint | number | string; teamId?: never }
+      | { teamId: bigint | number | string; userId?: never }
+    ),
   ): Promise<boolean> {
     const refType = input.refType ?? null;
     const result = await client.activityLog.updateMany({
       where: {
-        userId: toBigInt(input.userId),
+        ...(input.teamId === undefined
+          ? { userId: toBigInt(input.userId) }
+          : { teamId: toBigInt(input.teamId) }),
         type: input.type,
         refType,
         refId: toBigInt(input.refId),
