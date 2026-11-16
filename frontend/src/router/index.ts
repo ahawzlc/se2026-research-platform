@@ -52,7 +52,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'literatures',
         name: 'literatures',
-        component: () => import('@/views/PlaceholderView.vue'),
+        component: () => import('@/views/LiteraturesView.vue'),
         meta: { title: '文献管理', owner: 'C' }
       },
       {
