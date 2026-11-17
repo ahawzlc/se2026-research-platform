@@ -186,3 +186,64 @@ describe('ConversationsService.markRead', () => {
     });
   });
 });
+
+describe('ConversationsService.listConversations', () => {
+  it('private 会话按查看者解析对方昵称作 title（共享 title 列为空）', async () => {
+    const { service, prisma } = createService();
+    prisma.conversation.count.mockResolvedValue(1);
+    prisma.conversation.findMany.mockResolvedValue([
+      {
+        id: 9n,
+        type: 'private',
+        title: null,
+        refType: 'private',
+        refId: null,
+        updatedAt: new Date('2026-11-17T10:00:00Z'),
+        members: [{ lastReadAt: null }],
+      },
+    ]);
+    prisma.message.findFirst.mockResolvedValue(null);
+    prisma.message.count.mockResolvedValue(2);
+    // fillPrivateTitles：查列表内 private 会话的对方成员（一次 in 查询，排除查看者）
+    prisma.conversationMember.findMany.mockResolvedValue([
+      {
+        conversationId: 9n,
+        user: { username: 'c5mate', nickname: 'C5 Mate' },
+      },
+    ]);
+
+    const result = await service.listConversations('1', {});
+    expect(result.total).toBe(1);
+    expect(result.list[0].title).toBe('C5 Mate');
+    expect(result.list[0].unreadCount).toBe(2);
+    expect(result.list[0].lastMessage).toBe('');
+
+    const peerQuery = prisma.conversationMember.findMany.mock.calls[0][0] as {
+      where: { conversationId: { in: bigint[] }; userId: { not: bigint }; deleted: number };
+    };
+    expect(peerQuery.where.conversationId.in).toEqual([9n]);
+    expect(peerQuery.where.userId.not).toBe(1n);
+  });
+
+  it('非 private 会话不触发对方成员查询', async () => {
+    const { service, prisma } = createService();
+    prisma.conversation.count.mockResolvedValue(1);
+    prisma.conversation.findMany.mockResolvedValue([
+      {
+        id: 10n,
+        type: 'group',
+        title: 'C5 Verify Project',
+        refType: 'project',
+        refId: 1n,
+        updatedAt: new Date('2026-11-17T10:00:00Z'),
+        members: [{ lastReadAt: null }],
+      },
+    ]);
+    prisma.message.findFirst.mockResolvedValue(null);
+    prisma.message.count.mockResolvedValue(0);
+
+    const result = await service.listConversations('1', {});
+    expect(result.list[0].title).toBe('C5 Verify Project');
+    expect(prisma.conversationMember.findMany).not.toHaveBeenCalled();
+  });
+});

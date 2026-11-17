@@ -219,6 +219,7 @@ export class ConversationsService {
     const items = await Promise.all(
       rows.map((row) => this.toConversationItem(row)),
     );
+    await this.fillPrivateTitles(userId, items);
     return { list: items, total, page, size };
   }
 
@@ -334,7 +335,47 @@ export class ConversationsService {
     if (!row) {
       throw BizException.notFound('会话不存在');
     }
-    return this.toConversationItem(row);
+    const item = await this.toConversationItem(row);
+    await this.fillPrivateTitles(userId, [item]);
+    return item;
+  }
+
+  /**
+   * private 会话的展示名对每个查看者不同（对方的名字），共享的 title 列在建会话时
+   * 无法写入（双方视角不一样），这里按查看者批量解析并覆盖：
+   * 一次 in 查询取列表内全部 private 会话的对方成员，避免逐会话 N+1。
+   */
+  private async fillPrivateTitles(
+    userId: string,
+    items: ConversationItem[],
+  ): Promise<void> {
+    const privateIds = items
+      .filter((item) => item.type === 'private')
+      .map((item) => BigInt(item.id));
+    if (privateIds.length === 0) return;
+
+    const peers = await this.prisma.conversationMember.findMany({
+      where: {
+        conversationId: { in: privateIds },
+        userId: { not: BigInt(userId) },
+        deleted: 0,
+      },
+      select: {
+        conversationId: true,
+        user: { select: { username: true, nickname: true } },
+      },
+    });
+    const nameByConversation = new Map(
+      peers.map((peer) => [
+        peer.conversationId.toString(),
+        peer.user.nickname || peer.user.username,
+      ]),
+    );
+    for (const item of items) {
+      if (item.type === 'private') {
+        item.title = nameByConversation.get(item.id) || item.title;
+      }
+    }
   }
 
   /** 会话消息列表（带成员权限校验） */
