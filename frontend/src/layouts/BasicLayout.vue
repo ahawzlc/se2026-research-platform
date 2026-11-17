@@ -27,6 +27,7 @@ const menuItems = [
   { path: '/literatures', title: '文献管理' },
   { path: '/meetings', title: '会议管理' },
   { path: '/achievements', title: '成果管理' },
+  { path: '/messages', title: '协作消息' },
   { path: '/contribution', title: '参与度分析' },
   { path: '/members', title: '课题组成员' }
 ]

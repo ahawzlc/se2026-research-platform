@@ -68,6 +68,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '成果管理', owner: 'C' }
       },
       {
+        path: 'messages',
+        name: 'messages',
+        component: () => import('@/views/MessagesView.vue'),
+        meta: { title: '协作消息', owner: 'C' }
+      },
+      {
         path: 'contribution',
         name: 'contribution',
         component: () => import('@/views/ParticipationView.vue'),
