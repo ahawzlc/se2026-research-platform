@@ -5,6 +5,7 @@ import {
   NotFoundException,
   Post,
   Put,
+  UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -15,6 +16,7 @@ import { LoginDto } from './dto/login.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdatePasswordDto } from './dto/update-password.dto';
 import { Public } from '../common/decorators/public.decorator';
+import { AuthRateLimitGuard } from './auth-rate-limit.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { CurrentUserPayload } from '../common/decorators/current-user.decorator';
 
@@ -27,6 +29,7 @@ export class AuthController {
   ) {}
 
   @Public()
+  @UseGuards(AuthRateLimitGuard)
   @Post('register')
   @ApiOperation({ summary: '注册（注册即登录，直接返回令牌与用户信息）' })
   async register(@Body() dto: RegisterDto) {
@@ -34,6 +37,7 @@ export class AuthController {
   }
 
   @Public()
+  @UseGuards(AuthRateLimitGuard)
   @Post('login')
   @ApiOperation({ summary: '登录，返回令牌与用户信息' })
   async login(@Body() dto: LoginDto) {
