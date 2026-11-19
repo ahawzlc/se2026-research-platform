@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { authApi } from '@/api'
+import ProfileSettingsDialog from '@/components/ProfileSettingsDialog.vue'
 import { useUserStore } from '@/store/user'
 
 const route = useRoute()
@@ -40,8 +41,13 @@ function handleCommand(command: string): void {
   if (command === 'logout') {
     userStore.reset()
     void router.replace({ name: 'login' })
+  } else if (command === 'settings') {
+    settingsVisible.value = true
   }
 }
+
+/** 个人设置弹窗（卡 A-补1 资料 / A-补2 改密） */
+const settingsVisible = ref(false)
 </script>
 
 <template>
@@ -65,7 +71,8 @@ function handleCommand(command: string): void {
           <span class="app-user">{{ displayName }}</span>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="logout">退出登录</el-dropdown-item>
+              <el-dropdown-item command="settings">个人设置</el-dropdown-item>
+              <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -75,6 +82,9 @@ function handleCommand(command: string): void {
         <router-view />
       </el-main>
     </el-container>
+
+    <!-- 个人设置（资料/改密），全局入口挂在顶栏用户下拉 -->
+    <ProfileSettingsDialog v-model="settingsVisible" />
   </el-container>
 </template>
 

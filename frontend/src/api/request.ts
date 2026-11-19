@@ -23,6 +23,14 @@ instance.interceptors.request.use((config) => {
 
 let redirecting = false
 
+/**
+ * 业务型 401（登录密码错 / 改密旧密码错，卡 A-补2）：按 docs/01 与登录惯例返回 401，
+ * 但这类失败不代表登录态失效——只提示错误，不触发清态跳登录。
+ */
+function isAuthBusinessPath(url?: string): boolean {
+  return !!url && (url.includes('/auth/login') || url.includes('/auth/password'))
+}
+
 function handleUnauthorized(): void {
   if (redirecting) return
   redirecting = true
@@ -51,7 +59,11 @@ instance.interceptors.response.use(
       return body.data
     }
     if (body.code === 401) {
-      handleUnauthorized()
+      if (isAuthBusinessPath(response.config?.url)) {
+        ElMessage.error(body.message || '操作失败')
+      } else {
+        handleUnauthorized()
+      }
     } else {
       ElMessage.error(body.message || '请求失败')
     }
@@ -61,7 +73,13 @@ instance.interceptors.response.use(
     if (axios.isCancel(error)) return Promise.reject(error)
     const status = error?.response?.status
     if (status === 401) {
-      handleUnauthorized()
+      if (isAuthBusinessPath(error?.config?.url)) {
+        // 业务型 401 的返回体仍是统一结构（code/message）
+        const msg = (error?.response?.data as ApiResult | undefined)?.message
+        ElMessage.error(msg || '操作失败')
+      } else {
+        handleUnauthorized()
+      }
     } else if (status === 403) {
       ElMessage.error('没有操作权限')
     } else if (status === 404) {
