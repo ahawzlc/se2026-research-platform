@@ -62,13 +62,13 @@ function groupTasks(list: TaskItem[]): Record<TaskStatus, TaskItem[]> {
   return grouped
 }
 
-async function loadProjects(preferred?: TaskItem): Promise<void> {
+async function loadProjects(preferredProjectId?: string): Promise<void> {
   const result = await projectsApi.fetchProjects({ page: 1, size: 100 })
   projects.value = result.list
-  if (preferred) {
-    if (!projects.value.some(project => project.id === preferred.projectId))
-      projects.value.push(await projectsApi.fetchProject(preferred.projectId))
-    currentProjectId.value = preferred.projectId
+  if (preferredProjectId) {
+    if (!projects.value.some(project => project.id === preferredProjectId))
+      projects.value.push(await projectsApi.fetchProject(preferredProjectId))
+    currentProjectId.value = preferredProjectId
     return
   }
   if (!projects.value.some((p) => p.id === currentProjectId.value)) {
@@ -366,8 +366,10 @@ watch(currentProjectId, () => {
 
 onMounted(async () => {
   const taskId = typeof route.query.taskId === 'string' ? route.query.taskId : ''
+  const projectId = typeof route.query.projectId === 'string' ? route.query.projectId : ''
   const task = taskId ? await tasksApi.fetchTask(taskId).catch(() => undefined) : undefined
-  await loadProjects(task)
+  // 优先taskId定位到任务；否则支持projectId定位（项目概览页「查看任务」跳转）
+  await loadProjects(task?.projectId ?? projectId)
   if (!task) return
   if (route.query.comments === '1') void openComments(task)
   else openEdit(task)
