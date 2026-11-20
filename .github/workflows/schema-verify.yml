@@ -70,7 +70,8 @@ jobs:
           echo "基线表数: $(mysql -h127.0.0.1 -uroot -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='se2026'")"
           for f in deploy/mysql/migrations/*.sql; do
             echo ">> 回放 $f"
-            mysql -h127.0.0.1 -uroot -f < "$f"
+            # 迁移脚本按 20261103-01 惯例不带 USE（部署时库名按需替换），这里显式指定库
+            mysql -h127.0.0.1 -uroot -f se2026 < "$f"
           done
 
       - name: 断言B——升级终态与全新安装同构
@@ -85,7 +86,7 @@ jobs:
 
       - name: 断言C——迁移幂等（重复回放不炸、数据不翻倍）
         run: |
-          for f in deploy/mysql/migrations/*.sql; do mysql -h127.0.0.1 -uroot -f < "$f"; done
+          for f in deploy/mysql/migrations/*.sql; do mysql -h127.0.0.1 -uroot -f se2026 < "$f"; done
           q() { mysql -h127.0.0.1 -uroot -N -e "$1"; }
           [ "$(q "SELECT COUNT(*) FROM se2026.community_tag WHERE deleted=0")" = 8 ] \
             || { echo "::error::迁移重复执行后标签种子翻倍"; exit 1; }
