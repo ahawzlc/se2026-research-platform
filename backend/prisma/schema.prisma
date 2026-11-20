@@ -2,15 +2,17 @@
 // 校园科研项目协作与成果管理平台 —— Prisma 数据模型
 // ------------------------------------------------------------------------------
 // 口径来源：deploy/mysql/init/01-schema.sql 与 docs/02-数据字典.md
-// 表数量：18（账号 3 + 支撑 1 + 业务 10 + 沟通 3 + 统计 1）
+// 表数量：24（账号 3 + 支撑 1 + 业务 10 + 沟通 3 + 统计 1 + 社区与通知 6）
 //
 // 【重要约定，组内必读】
 //   1. 建表以 deploy/mysql/init/01-schema.sql 为准；本文件只做映射，不改结构。
 //   2. 禁止执行 `prisma migrate dev` 与 `prisma db push`：它们会按本模型重建/改动
 //      表结构，与既有 DDL 冲突。
-//   3. 数据库层【不使用外键】，本文件里的 relation 只是 Prisma 的逻辑关系，
-//      用于支持 `include` 联表查询，不会在库里生成外键约束。
-//      → 因此【不要】用 `prisma db pull` 覆盖本文件，反向生成看不到逻辑关系。
+//   3. 数据库层外键自 2026-11-03 起与 init SQL 严格对齐（约束名 `<表>_<列>_fkey`，
+//      ON DELETE RESTRICT / 可空列 SET NULL / ON UPDATE CASCADE，口径见 docs/02）；
+//      多态引用列（conversation / message / activity_log / notification 的
+//      ref_type + ref_id）不建外键，指向哪张表由应用层 ref_type 决定。
+//      → 仍【不要】用 `prisma db pull` 覆盖本文件：反向生成不带自定义关系名。
 //   4. 字段命名：TypeScript 侧用 camelCase，数据库侧用 snake_case（@map / @@map）。
 //   5. 所有表都有 `deleted` 逻辑删除标记（0 正常 / 1 已删除），
 //      业务查询必须显式带 `deleted: 0`——Prisma 不会自动过滤。
@@ -53,6 +55,12 @@ model User {
   conversationMembers ConversationMember[]
   sentMessages      Message[]           @relation("MessageSender")
   activityLogs      ActivityLog[]
+  communityPosts    CommunityPost[]     @relation("CommunityPostAuthor")
+  teamApplications  TeamApplication[]   @relation("TeamApplicant")
+  handledApplications TeamApplication[] @relation("ApplicationHandler")
+  friendshipRequested Friendship[]      @relation("FriendshipRequester")
+  friendshipReceived  Friendship[]      @relation("FriendshipAddressee")
+  notifications     Notification[]
 
   @@index([email], map: "idx_user_email")
   @@map("user")
@@ -74,6 +82,7 @@ model Team {
   projects    Project[]
   literature  Literature[]
   activityLogs ActivityLog[]
+  communityPosts CommunityPost[]
 
   @@index([ownerId], map: "idx_team_owner")
   @@map("team")
@@ -320,7 +329,7 @@ model AchievementMember {
 // 四、沟通类（统一会话模型：评论 / 讨论区 / 私信共用）
 // ==============================================================================
 
-/// 会话；type: comment（上下文评论）/ group（项目讨论区）/ private（私信，不计入统计）
+/// 会话；type: comment（上下文评论）/ group（项目讨论区）/ private（私信，不计入统计）/ meeting（会议讨论区，ref 指向 meeting，F-1）
 model Conversation {
   id        BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
   type      String   @db.VarChar(20)
@@ -399,4 +408,125 @@ model ActivityLog {
   @@index([userId, createdAt], map: "idx_log_user_time")
   @@index([type, refType, refId], map: "idx_log_ref")
   @@map("activity_log")
+}
+
+// ==============================================================================
+// 六、社区与通知类（2026-11-20，卡 G-0；存量库用 migrations/20261120-01 增量升级）
+// ==============================================================================
+
+/// 组队广场标签字典；category: competition 竞赛 / course 课程；种子清单见 init SQL 与 migration（两处同步维护）
+model CommunityTag {
+  id        BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  name      String   @db.VarChar(50)
+  category  String   @db.VarChar(20)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted   Int      @default(0) @db.UnsignedTinyInt
+
+  posts CommunityPostTag[]
+
+  @@unique([name, category], map: "uk_community_tag")
+  @@map("community_tag")
+}
+
+/// 组队招募帖；status: recruiting 招募中 / full 已满员 / closed 已停止；平台第一个跨组公开内容
+model CommunityPost {
+  id             BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  userId         BigInt   @map("user_id") @db.UnsignedBigInt
+  title          String   @db.VarChar(50)
+  content        String?  @db.Text
+  recruitTotal   Int      @default(1) @map("recruit_total") @db.UnsignedTinyInt
+  recruitedCount Int      @default(0) @map("recruited_count") @db.UnsignedTinyInt
+  status         String   @default("recruiting") @db.VarChar(20)
+  teamId         BigInt?  @map("team_id") @db.UnsignedBigInt
+  createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted        Int      @default(0) @db.UnsignedTinyInt
+
+  author       User                @relation("CommunityPostAuthor", fields: [userId], references: [id])
+  team         Team?               @relation(fields: [teamId], references: [id])
+  tags         CommunityPostTag[]
+  applications TeamApplication[]
+
+  @@index([userId], map: "idx_community_post_user")
+  @@index([status, id], map: "idx_community_post_status")
+  @@index([teamId], map: "community_post_team_id_fkey")
+  @@map("community_post")
+}
+
+/// 帖子-标签关联（照 literature_tag 模式：无 updated_at）
+model CommunityPostTag {
+  id        BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  postId    BigInt   @map("post_id") @db.UnsignedBigInt
+  tagId     BigInt   @map("tag_id") @db.UnsignedBigInt
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  deleted   Int      @default(0) @db.UnsignedTinyInt
+
+  post CommunityPost @relation(fields: [postId], references: [id])
+  tag  CommunityTag  @relation(fields: [tagId], references: [id])
+
+  @@unique([postId, tagId], map: "uk_community_post_tag")
+  @@map("community_post_tag")
+}
+
+/// 组队申请；status: pending / approved / rejected（不可逆）；被拒后不可再申请同帖（唯一键 + 状态校验双保险）
+model TeamApplication {
+  id        BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  postId    BigInt    @map("post_id") @db.UnsignedBigInt
+  userId    BigInt    @map("user_id") @db.UnsignedBigInt
+  note      String    @default("") @db.VarChar(200)
+  status    String    @default("pending") @db.VarChar(20)
+  handledBy BigInt?   @map("handled_by") @db.UnsignedBigInt
+  handledAt DateTime? @map("handled_at") @db.DateTime(0)
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted   Int       @default(0) @db.UnsignedTinyInt
+
+  post      CommunityPost @relation(fields: [postId], references: [id])
+  applicant User          @relation("TeamApplicant", fields: [userId], references: [id])
+  handler   User?         @relation("ApplicationHandler", fields: [handledBy], references: [id])
+
+  @@unique([postId, userId], map: "uk_team_application")
+  @@index([userId], map: "idx_team_application_user")
+  @@index([handledBy], map: "team_application_handled_by_fkey")
+  @@map("team_application")
+}
+
+/// 好友关系（单向行表示一条关系）；status: pending / accepted / rejected（被拒可再次发起：复用本行改回 pending，受唯一键约束）
+model Friendship {
+  id           BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  requesterId  BigInt    @map("requester_id") @db.UnsignedBigInt
+  addresseeId  BigInt    @map("addressee_id") @db.UnsignedBigInt
+  status       String    @default("pending") @db.VarChar(20)
+  handledAt    DateTime? @map("handled_at") @db.DateTime(0)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted      Int       @default(0) @db.UnsignedTinyInt
+
+  requester User @relation("FriendshipRequester", fields: [requesterId], references: [id])
+  addressee User @relation("FriendshipAddressee", fields: [addresseeId], references: [id])
+
+  @@unique([requesterId, addresseeId], map: "uk_friendship")
+  @@index([addresseeId], map: "idx_friendship_addressee")
+  @@map("friendship")
+}
+
+/// 站内通知；type: team_apply / team_apply_approved / team_apply_rejected / friend_request / friend_accepted / meeting_upcoming（F-2 占位）；唯一写入口是 G-1 的 NotificationService.push
+model Notification {
+  id        BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  userId    BigInt   @map("user_id") @db.UnsignedBigInt
+  type      String   @db.VarChar(30)
+  title     String   @db.VarChar(200)
+  refType   String?  @map("ref_type") @db.VarChar(30)
+  refId     BigInt?  @map("ref_id") @db.UnsignedBigInt
+  isRead    Int      @default(0) @map("is_read") @db.UnsignedTinyInt
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(0)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
+  deleted   Int      @default(0) @db.UnsignedTinyInt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, isRead], map: "idx_notification_user_read")
+  @@index([userId, type, refId], map: "idx_notification_dedupe")
+  @@map("notification")
 }

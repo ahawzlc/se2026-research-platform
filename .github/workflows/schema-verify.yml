@@ -1,0 +1,92 @@
+# ==============================================================================
+# 真库回放校验（卡 G-0 起常驻）：MySQL 8 容器里重放建库脚本，断言表/外键/种子
+# ------------------------------------------------------------------------------
+# 两条路径都要过：
+#   A 全新安装：01-schema.sql 直接重放（模拟数据卷为空的首启）；
+#   B 存量升级：基线分支的 init SQL 建出旧库，再依序回放 migrations/*.sql
+#     （模拟线上库升级；用 -f 跳过「已迁移过」的重复约束报错——那是 20261103-01
+#       头注释里约定的一次性脚本特性，非真错误）。
+# 触发：deploy/mysql/**、schema.prisma 或本文件变动的 PR。
+# ==============================================================================
+
+name: schema-verify
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/mysql/**'
+      - 'backend/prisma/schema.prisma'
+      - '.github/workflows/schema-verify.yml'
+  workflow_dispatch:
+
+jobs:
+  replay:
+    name: 真库回放校验（G-0）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -uroot -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    env:
+      MYSQL_PWD: root
+
+    steps:
+      - name: 检出代码（含基线分支历史）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 路径A 全新安装——重放 01-schema.sql
+        run: mysql -h127.0.0.1 -uroot < deploy/mysql/init/01-schema.sql
+
+      - name: 断言A——表数/外键数/标签种子/枚举注释
+        run: |
+          q() { mysql -h127.0.0.1 -uroot -N -e "$1"; }
+          check() { # 期望值 实际值 说明
+            [ "$2" = "$1" ] || { echo "::error::$3 期望 $1 实际 $2"; exit 1; }
+          }
+          check 24 "$(q "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='se2026'")" "全库表数"
+          check 38 "$(q "SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='se2026'")" "外键总数"
+          check 8  "$(q "SELECT COUNT(*) FROM se2026.community_tag WHERE deleted=0")" "标签字典种子"
+          check 1  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='conversation' AND column_name='type' AND column_comment LIKE '%meeting%'")" "conversation.type 含 meeting"
+          echo "PATH_A_OK 全新安装路径通过"
+
+      - name: 路径B 存量升级——基线 init SQL + 依序回放 migrations
+        run: |
+          git show origin/develop:deploy/mysql/init/01-schema.sql > /tmp/base.sql
+          mysql -h127.0.0.1 -uroot -e 'DROP DATABASE `se2026`'
+          mysql -h127.0.0.1 -uroot < /tmp/base.sql
+          echo "基线表数: $(mysql -h127.0.0.1 -uroot -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='se2026'")"
+          for f in deploy/mysql/migrations/*.sql; do
+            echo ">> 回放 $f"
+            mysql -h127.0.0.1 -uroot -f < "$f"
+          done
+
+      - name: 断言B——升级终态与全新安装同构
+        run: |
+          q() { mysql -h127.0.0.1 -uroot -N -e "$1"; }
+          check() { [ "$2" = "$1" ] || { echo "::error::$3 期望 $1 实际 $2"; exit 1; }; }
+          check 24 "$(q "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='se2026'")" "全库表数"
+          check 38 "$(q "SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='se2026'")" "外键总数"
+          check 8  "$(q "SELECT COUNT(*) FROM se2026.community_tag WHERE deleted=0")" "标签字典种子"
+          check 1  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='conversation' AND column_name='type' AND column_comment LIKE '%meeting%'")" "conversation.type 含 meeting"
+          echo "PATH_B_OK 存量升级路径通过"
+
+      - name: 断言C——迁移幂等（重复回放不炸、数据不翻倍）
+        run: |
+          for f in deploy/mysql/migrations/*.sql; do mysql -h127.0.0.1 -uroot -f < "$f"; done
+          q() { mysql -h127.0.0.1 -uroot -N -e "$1"; }
+          [ "$(q "SELECT COUNT(*) FROM se2026.community_tag WHERE deleted=0")" = 8 ] \
+            || { echo "::error::迁移重复执行后标签种子翻倍"; exit 1; }
+          echo "PATH_C_OK 幂等通过"
