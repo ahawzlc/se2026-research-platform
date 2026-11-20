@@ -219,7 +219,11 @@ describe('ConversationsService.listConversations', () => {
     expect(result.list[0].lastMessage).toBe('');
 
     const peerQuery = prisma.conversationMember.findMany.mock.calls[0][0] as {
-      where: { conversationId: { in: bigint[] }; userId: { not: bigint }; deleted: number };
+      where: {
+        conversationId: { in: bigint[] };
+        userId: { not: bigint };
+        deleted: number;
+      };
     };
     expect(peerQuery.where.conversationId.in).toEqual([9n]);
     expect(peerQuery.where.userId.not).toBe(1n);

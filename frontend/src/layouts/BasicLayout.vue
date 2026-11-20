@@ -22,6 +22,7 @@ onMounted(() => {
 
 const menuItems = [
   { path: '/dashboard', title: '工作台' },
+  { path: '/overview', title: '项目概览' },
   { path: '/projects', title: '项目管理' },
   { path: '/tasks', title: '任务看板' },
   { path: '/gantt', title: '甘特图' },

@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { onMounted, ref } from 'vue'
+import { loadOverview } from '@/utils/overview'
+
 interface TaskItem {
   name: string
   done: boolean
@@ -18,6 +21,20 @@ const statusTagType: Record<ModuleCard['status'], 'success' | 'warning' | 'info'
   进行中: 'warning',
   待开工: 'info'
 }
+
+/** 逾期提醒（卡 C-补1）：进入工作台即汇总一次，有逾期则挂横幅导流到项目概览 */
+const overdueTasks = ref(0)
+const overdueMilestones = ref(0)
+
+onMounted(async () => {
+  try {
+    const snapshot = await loadOverview()
+    overdueTasks.value = snapshot.overdueTasks.length
+    overdueMilestones.value = snapshot.overdueMilestones.length
+  } catch {
+    // 汇总失败不影响工作台其余内容；提醒条不展示
+  }
+})
 
 // 开工情况为人工维护的静态快照：依据 docs/09 任务分派表与 develop 合并记录，改状态请同步更新
 const modules: ModuleCard[] = [
@@ -44,7 +61,8 @@ const modules: ModuleCard[] = [
       { name: 'B-2 任务看板', done: true },
       { name: 'B-3 任务评论', done: true },
       { name: 'B-补2 甘特图', done: true },
-      { name: 'B-补1 项目概览·待建卡', done: false }
+      { name: 'B-补1 项目概览', done: true },
+      { name: 'C-补1 逾期提醒', done: true }
     ]
   },
   {
@@ -95,22 +113,31 @@ const modules: ModuleCard[] = [
 ]
 
 const prerequisites = [
-  'C 线四个模块（文献/会议/成果/消息）与 A-补1/补2 的前端页面尚未开发——后端接口已全部合并部署，以 docs/01 冻结口径为准',
-  'B-补1 项目概览、C-补1 逾期提醒两张补卡尚未建卡，先补卡再排期',
   '权重校准待真实使用样本：跑 scripts/acceptance/d-calibration.mjs，校准前后对比写回 docs/03',
-  '演示期 dev-token 仍开启（APP_ENABLE_DEV_TOKEN），正式验收/公网暴露前须关闭',
+  '演示期 dev-token 仍开启（APP_ENABLE_DEV_TOKEN），正式验收/公网暴露前按 docs/07 检查单关闭',
   '第 8 周收尾：全链路联调、性能与异常兜底、答辩材料与 v1.0 tag'
 ]
 </script>
 
 <template>
   <div class="dashboard">
+    <!-- 逾期提醒横幅（C-补1）：有逾期才出现，点击去项目概览处理 -->
+    <el-alert
+      v-if="overdueTasks + overdueMilestones > 0"
+      type="error"
+      :closable="false"
+      show-icon
+      :title="`逾期提醒：${overdueTasks} 个任务、${overdueMilestones} 个里程碑已过截止日期`"
+    >
+      <router-link to="/overview" class="overdue-link">去项目概览处理 →</router-link>
+    </el-alert>
+
     <el-alert
       type="info"
       :closable="false"
       show-icon
-      title="进度快照 2026-11-16：A / B / C / D 四线后端全部上线"
-      description="账号、项目任务（看板/甘特图/评论）、文献、会议、成果登记、协作消息、参与度统计与画像接口均已部署；下一步主攻 C 线与 A-补卡的前端页面、权重校准和第 8 周答辩收尾。"
+      title="进度快照 2026-11-20：SRS 已建卡故事前后端全部上线"
+      description="账号、项目任务（看板/甘特图/评论/概览/逾期提醒）、文献、会议、成果、协作消息、参与度画像、个人设置均已部署；剩余：权重校准待真实样本、答辩收尾（docs/07 检查单）。"
     />
 
     <h2 class="section-title">模块进度</h2>
@@ -176,6 +203,16 @@ const prerequisites = [
 .dashboard {
   display: flex;
   flex-direction: column;
+}
+
+.overdue-link {
+  color: var(--el-color-danger);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.overdue-link:hover {
+  text-decoration: underline;
 }
 
 .section-title {

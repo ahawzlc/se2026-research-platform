@@ -32,6 +32,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '工作台' }
       },
       {
+        path: 'overview',
+        name: 'overview',
+        component: () => import('@/views/OverviewView.vue'),
+        meta: { title: '项目概览', owner: 'B' }
+      },
+      {
         path: 'projects',
         name: 'projects',
         component: () => import('@/views/ProjectsView.vue'),
