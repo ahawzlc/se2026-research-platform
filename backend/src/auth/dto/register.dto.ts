@@ -1,3 +1,4 @@
+import { Transform } from 'class-transformer';
 import {
   IsEmail,
   IsNotEmpty,
@@ -35,9 +36,12 @@ export class RegisterDto {
   nickname!: string;
 
   @ApiPropertyOptional({
-    description: '邮箱（可选）',
+    description: '邮箱（可选，不填或空串均视为未提供，落库存空串）',
     example: 'zhangsan@example.com',
   })
+  // 可选字段契约：@IsOptional 只放行 undefined/null，前端表单不填会提交空串——
+  // 这里把空串归一为未提供（Issue #42），否则空串会继续走 @IsEmail 报 400
+  @Transform(({ value }) => (value === '' ? undefined : value))
   @IsOptional()
   @IsEmail({}, { message: '邮箱格式不正确' })
   @MaxLength(100, { message: '邮箱最长 100 个字符' })
