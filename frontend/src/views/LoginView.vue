@@ -46,7 +46,8 @@ async function handleSubmit(): Promise<void> {
             username: form.username,
             password: form.password,
             nickname: form.nickname,
-            email: form.email
+            // 可选项：空串不随请求发送（后端也已兼容空串=未提供，Issue #42）
+            ...(form.email ? { email: form.email } : {})
           })
     userStore.setToken(result.token)
     userStore.setUserInfo(result.user)

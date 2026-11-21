@@ -8,7 +8,7 @@
  *   - 登录限流（内存滑窗，进程内生效）真实触发。
  *
  * 用例顺序有意安排：限流用例放最后（会占满该用户名的登录窗口），
- * IP 维度整组消耗 8 次（上限 20/分钟），不会自缚。
+ * IP 维度整组消耗 10 次（上限 20/分钟），不会自缚。
  */
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
@@ -95,6 +95,38 @@ maybe('认证链真库集成（卡 T-1a）', () => {
       .send({ username: USERNAME, password: 'wrong-password' })
       .expect(401);
     expect(envelope<null>(bad).code).toBe(401);
+  });
+
+  it('邮箱为可选：不传或传空串均注册成功且落库存空串（Issue #42 防复发）', async () => {
+    const noEmail = await request(app.getHttpServer())
+      .post('/api/v1/auth/register')
+      .send({
+        username: `t1a_n1_${RUN}`,
+        password: 'Passw0rd!2026',
+        nickname: '无邮箱注册',
+      })
+      .expect(201);
+    expect(envelope<null>(noEmail).code).toBe(0);
+
+    const emptyEmail = await request(app.getHttpServer())
+      .post('/api/v1/auth/register')
+      .send({
+        username: `t1a_n2_${RUN}`,
+        password: 'Passw0rd!2026',
+        nickname: '空串邮箱注册',
+        email: '',
+      })
+      .expect(201);
+    expect(envelope<null>(emptyEmail).code).toBe(0);
+
+    // 落库口径：未提供时存空串（列 NOT NULL DEFAULT ''）
+    const rows = await prisma.user.findMany({
+      where: {
+        username: { in: [`t1a_n1_${RUN}`, `t1a_n2_${RUN}`] },
+      },
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.email === '')).toBe(true);
   });
 
   it('同一账号 1 分钟内第 6 次登录触发限流 400「尝试过于频繁」', async () => {
