@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { authApi } from '@/api'
+import { authApi, notificationsApi } from '@/api'
+import type { NotificationItem } from '@/api/notifications'
 import ProfileSettingsDialog from '@/components/ProfileSettingsDialog.vue'
 import { useUserStore } from '@/store/user'
 
@@ -18,7 +19,66 @@ onMounted(() => {
       .then((info) => userStore.setUserInfo(info))
       .catch(() => {})
   }
+  // 通知铃铛（卡 G-1）：未读数 30s 轮询，与消息页未读同节奏、各自独立互不覆盖
+  void pollUnread()
+  pollTimer = setInterval(() => {
+    void pollUnread()
+  }, POLL_INTERVAL_MS)
 })
+
+onBeforeUnmount(() => {
+  if (pollTimer) clearInterval(pollTimer)
+})
+
+// ---------------------------------------------------------------- 通知铃铛
+const POLL_INTERVAL_MS = 30_000
+const unreadCount = ref(0)
+const recentList = ref<NotificationItem[]>([])
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+async function pollUnread(): Promise<void> {
+  if (!userStore.token) return
+  try {
+    const data = await notificationsApi.fetchUnreadCount()
+    unreadCount.value = data.count
+  } catch {
+    // 轮询失败静默处理，不打扰用户
+  }
+}
+
+async function loadRecent(): Promise<void> {
+  try {
+    const data = await notificationsApi.fetchNotifications({ page: 1, size: 5 })
+    recentList.value = data.list
+  } catch {
+    // 提示由拦截器统一处理
+  }
+}
+
+function refTarget(item: NotificationItem): string {
+  // 已知来源跳对应页面；community_post / friendship 待线②③页面落地后接入
+  if (item.refType === 'meeting') return '/meetings'
+  if (item.refType === 'conversation') return '/messages'
+  return ''
+}
+
+async function handleNoticeClick(item: NotificationItem): Promise<void> {
+  if (!item.isRead) {
+    try {
+      await notificationsApi.markNotificationRead(item.id)
+    } catch {
+      return
+    }
+    item.isRead = 1
+    unreadCount.value = Math.max(0, unreadCount.value - 1)
+  }
+  const target = refTarget(item)
+  if (target) void router.push(target)
+}
+
+function goAllNotifications(): void {
+  void router.push('/notifications')
+}
 
 const menuItems = [
   { path: '/dashboard', title: '工作台' },
@@ -68,15 +128,48 @@ const settingsVisible = ref(false)
     <el-container>
       <el-header class="app-header">
         <span class="app-header-title">{{ pageTitle }}</span>
-        <el-dropdown @command="handleCommand">
-          <span class="app-user">{{ displayName }}</span>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item command="settings">个人设置</el-dropdown-item>
-              <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
+        <div class="app-header-right">
+          <el-popover placement="bottom-end" :width="360" trigger="click" @show="loadRecent">
+            <template #reference>
+              <el-badge
+                :value="unreadCount"
+                :hidden="unreadCount === 0"
+                :max="99"
+                class="bell-badge"
+              >
+                <span class="bell-icon">🔔</span>
+              </el-badge>
+            </template>
+            <div class="bell-panel">
+              <div class="bell-panel-head">
+                <span>通知</span>
+                <el-button link type="primary" size="small" @click="goAllNotifications">
+                  查看全部
+                </el-button>
+              </div>
+              <div v-if="recentList.length === 0" class="bell-empty">暂无通知</div>
+              <div
+                v-for="item in recentList"
+                :key="item.id"
+                class="bell-item"
+                :class="{ 'is-unread': !item.isRead }"
+                @click="handleNoticeClick(item)"
+              >
+                <div class="bell-item-title">{{ item.title }}</div>
+                <div class="bell-item-time">{{ item.createdAt }}</div>
+              </div>
+            </div>
+          </el-popover>
+          <el-dropdown @command="handleCommand">
+            <span class="app-user">{{ displayName }}</span>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="settings">个人设置</el-dropdown-item>
+                <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
       </el-header>
 
       <el-main class="app-main">
@@ -134,6 +227,54 @@ const settingsVisible = ref(false)
   cursor: pointer;
   color: #606266;
   outline: none;
+}
+
+.app-header-right {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.bell-icon {
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.bell-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.bell-empty {
+  padding: 12px 0;
+  text-align: center;
+  color: #909399;
+  font-size: 13px;
+}
+
+.bell-item {
+  padding: 8px 4px;
+  border-bottom: 1px dashed #ebeef5;
+  cursor: pointer;
+}
+
+.bell-item:hover {
+  background: #f5f7fa;
+}
+
+.is-unread .bell-item-title {
+  font-weight: 600;
+}
+
+.bell-item-time {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #909399;
 }
 
 .app-main {
