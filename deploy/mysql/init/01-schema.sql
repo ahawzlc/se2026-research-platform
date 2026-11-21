@@ -274,7 +274,7 @@ CREATE TABLE `achievement_member` (
 DROP TABLE IF EXISTS `conversation`;
 CREATE TABLE `conversation` (
   `id`         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
-  `type`       VARCHAR(20)     NOT NULL                COMMENT '类型：comment（上下文评论）/ group（项目讨论区）/ private（私信）',
+  `type`       VARCHAR(20)     NOT NULL                COMMENT '类型：comment（上下文评论）/ group（项目讨论区）/ private（私信）/ meeting（会议讨论区，ref 指向 meeting）',
   `ref_type`   VARCHAR(30)     NULL                    COMMENT '业务对象类型（task / achievement / meeting / project），私信为空',
   `ref_id`     BIGINT UNSIGNED NULL                    COMMENT '业务对象主键，私信为空',
   `title`      VARCHAR(200)    NULL                    COMMENT '会话标题（群组用）',
@@ -342,9 +342,126 @@ CREATE TABLE `activity_log` (
   CONSTRAINT `activity_log_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='行为埋点流水（只增不改）';
 
+-- ==============================================================================
+-- 六、社区与通知类（2026-11-20，卡 G-0；存量库用 migrations/20261120-01 增量升级）
+-- ==============================================================================
+
+DROP TABLE IF EXISTS `community_tag`;
+CREATE TABLE `community_tag` (
+  `id`         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `name`       VARCHAR(50)     NOT NULL                COMMENT '标签名，如「互联网+」「软件工程」',
+  `category`   VARCHAR(20)     NOT NULL                COMMENT '大类：competition 竞赛 / course 课程',
+  `created_at` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `deleted`    TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_community_tag` (`name`, `category`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='组队广场标签字典';
+
+DROP TABLE IF EXISTS `community_post`;
+CREATE TABLE `community_post` (
+  `id`              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `user_id`         BIGINT UNSIGNED NOT NULL                COMMENT '发帖人 user.id',
+  `title`           VARCHAR(50)     NOT NULL                COMMENT '招募标题',
+  `content`         TEXT            NULL                    COMMENT '项目情况说明',
+  `recruit_total`   TINYINT UNSIGNED NOT NULL DEFAULT 1     COMMENT '招募人数上限（1-10）',
+  `recruited_count` TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '已招人数（每审批通过一人 +1）',
+  `status`          VARCHAR(20)     NOT NULL DEFAULT 'recruiting' COMMENT '状态：recruiting 招募中 / full 已满员 / closed 已停止',
+  `team_id`         BIGINT UNSIGNED NULL                    COMMENT '审批通过后绑定的课题组 team.id，未绑定为空',
+  `created_at`      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at`      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `deleted`         TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
+  PRIMARY KEY (`id`),
+  KEY `idx_community_post_user` (`user_id`),
+  KEY `idx_community_post_status` (`status`, `id`),
+  KEY `community_post_team_id_fkey` (`team_id`),
+  CONSTRAINT `community_post_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `community_post_team_id_fkey` FOREIGN KEY (`team_id`) REFERENCES `team` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='组队招募帖（平台第一个跨组公开内容）';
+
+DROP TABLE IF EXISTS `community_post_tag`;
+CREATE TABLE `community_post_tag` (
+  `id`         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `post_id`    BIGINT UNSIGNED NOT NULL                COMMENT 'community_post.id',
+  `tag_id`     BIGINT UNSIGNED NOT NULL                COMMENT 'community_tag.id',
+  `created_at` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `deleted`    TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_community_post_tag` (`post_id`, `tag_id`),
+  CONSTRAINT `community_post_tag_post_id_fkey` FOREIGN KEY (`post_id`) REFERENCES `community_post` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `community_post_tag_tag_id_fkey` FOREIGN KEY (`tag_id`) REFERENCES `community_tag` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='帖子-标签关联（照 literature_tag 模式，无 updated_at）';
+
+DROP TABLE IF EXISTS `team_application`;
+CREATE TABLE `team_application` (
+  `id`         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `post_id`    BIGINT UNSIGNED NOT NULL                COMMENT 'community_post.id',
+  `user_id`    BIGINT UNSIGNED NOT NULL                COMMENT '申请人 user.id',
+  `note`       VARCHAR(200)    NOT NULL DEFAULT ''     COMMENT '申请说明',
+  `status`     VARCHAR(20)     NOT NULL DEFAULT 'pending' COMMENT '状态：pending 待处理 / approved 已通过 / rejected 已拒绝（不可逆；被拒后不可再申请同帖）',
+  `handled_by` BIGINT UNSIGNED NULL                    COMMENT '处理人 user.id（发帖人）',
+  `handled_at` DATETIME        NULL                    COMMENT '处理时间',
+  `created_at` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `deleted`    TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_team_application` (`post_id`, `user_id`),
+  KEY `idx_team_application_user` (`user_id`),
+  KEY `team_application_handled_by_fkey` (`handled_by`),
+  CONSTRAINT `team_application_post_id_fkey` FOREIGN KEY (`post_id`) REFERENCES `community_post` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `team_application_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `team_application_handled_by_fkey` FOREIGN KEY (`handled_by`) REFERENCES `user` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='组队申请';
+
+DROP TABLE IF EXISTS `friendship`;
+CREATE TABLE `friendship` (
+  `id`           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `requester_id` BIGINT UNSIGNED NOT NULL                COMMENT '发起方 user.id',
+  `addressee_id` BIGINT UNSIGNED NOT NULL                COMMENT '接收方 user.id',
+  `status`       VARCHAR(20)     NOT NULL DEFAULT 'pending' COMMENT '状态：pending 待同意 / accepted 已互为好友 / rejected 已拒绝（可再次发起：复用本行改回 pending）',
+  `handled_at`   DATETIME        NULL                    COMMENT '处理时间',
+  `created_at`   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at`   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `deleted`      TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_friendship` (`requester_id`, `addressee_id`),
+  KEY `idx_friendship_addressee` (`addressee_id`),
+  CONSTRAINT `friendship_requester_id_fkey` FOREIGN KEY (`requester_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `friendship_addressee_id_fkey` FOREIGN KEY (`addressee_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='好友关系（单向行表示一条关系）';
+
+DROP TABLE IF EXISTS `notification`;
+CREATE TABLE `notification` (
+  `id`         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `user_id`    BIGINT UNSIGNED NOT NULL                COMMENT '接收人 user.id',
+  `type`       VARCHAR(30)     NOT NULL                COMMENT '类型：team_apply / team_apply_approved / team_apply_rejected / friend_request / friend_accepted / meeting_upcoming（F-2 占位）',
+  `title`      VARCHAR(200)    NOT NULL                COMMENT '通知标题',
+  `ref_type`   VARCHAR(30)     NULL                    COMMENT '跳转来源对象类型（community_post / friendship / meeting / conversation），多态引用不建外键',
+  `ref_id`     BIGINT UNSIGNED NULL                    COMMENT '跳转来源对象主键',
+  `is_read`    TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '已读：0 未读，1 已读',
+  `created_at` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at` DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `deleted`    TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
+  PRIMARY KEY (`id`),
+  KEY `idx_notification_user_read` (`user_id`, `is_read`),
+  KEY `idx_notification_dedupe` (`user_id`, `type`, `ref_id`),
+  CONSTRAINT `notification_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='站内通知（G-1 push 接口唯一写入口）';
+
+-- ---- 标签字典预置（docs/12 决策点 1 草案版；与 migrations/20261120-01 内清单同步维护）----
+INSERT INTO `community_tag` (`name`, `category`) VALUES
+  ('互联网+',  'competition'),
+  ('挑战杯',   'competition'),
+  ('数学建模', 'competition'),
+  ('大创项目', 'competition'),
+  ('蓝桥杯',   'competition'),
+  ('软件工程', 'course'),
+  ('毕业设计', 'course'),
+  ('课程设计', 'course');
+
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- ==============================================================================
--- 完成。共 18 张表：
---   账号 3 + 支撑 1 + 业务 10 + 沟通 3 + 统计 1
+-- 完成。共 24 张表：
+--   账号 3 + 支撑 1 + 业务 10 + 沟通 3 + 统计 1 + 社区与通知 6
 -- ==============================================================================
