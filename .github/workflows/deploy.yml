@@ -72,9 +72,55 @@ jobs:
         working-directory: frontend
         run: npm run lint
 
+  test-integration:
+    name: 真库集成测试（卡 T-1a）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -uroot -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    env:
+      MYSQL_PWD: root
+      # 真库集成开关：未设 RUN_INTEGRATION 时套件整组跳过（schema-verify 环境同款 MySQL 容器）
+      RUN_INTEGRATION: "1"
+      DATABASE_URL: mysql://root:root@127.0.0.1:3306/se2026
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node 22（与生产镜像 node:22-alpine 一致）
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: 后端依赖
+        working-directory: backend
+        run: npm ci
+
+      - name: 重放建库脚本（01-schema.sql，与 schema-verify 同口径）
+        run: mysql -h127.0.0.1 -uroot < deploy/mysql/init/01-schema.sql
+
+      - name: 运行真库集成测试（认证链 + 通知中心）
+        working-directory: backend
+        run: npm run test:integration
+
   deploy:
     name: 部署到组服务器
-    needs: test
+    needs: [test, test-integration]
     # PR 只跑测试不部署；push / 手动触发在 test 通过后才部署
     if: github.event_name != 'pull_request'
     # 串行化只约束部署本身，不阻塞 PR 的测试跑批
