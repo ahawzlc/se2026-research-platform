@@ -90,6 +90,12 @@ const routes: RouteRecordRaw[] = [
         name: 'members',
         component: () => import('@/views/MembersView.vue'),
         meta: { title: '课题组成员', owner: 'A' }
+      },
+      {
+        path: 'notifications',
+        name: 'notifications',
+        component: () => import('@/views/NotificationsView.vue'),
+        meta: { title: '通知中心' }
       }
     ]
   },
