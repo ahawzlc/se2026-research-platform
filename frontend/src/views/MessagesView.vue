@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { authApi, conversationsApi, projectsApi, teamsApi } from '@/api'
 import type { ConversationItem, ConversationType, MessageItem } from '@/api/conversations'
 import type { ProjectItem } from '@/api/projects'
@@ -19,7 +19,6 @@ const POLL_INTERVAL_MS = 30_000
 
 const userStore = useUserStore()
 const route = useRoute()
-const router = useRouter()
 const myUserId = computed(() => userStore.userInfo?.id ?? '')
 
 // ---------------------------------------------------------------- 会话列表
@@ -150,20 +149,15 @@ function openPrivateDialog(): void {
   }
 }
 
-/** 打开（或新建）与指定用户的私信会话，并定位到它 */
-async function openPrivateWith(peer: string): Promise<void> {
-  const conv = await conversationsApi.ensurePrivateConversation(peer)
-  await loadConversations()
-  const target = conversations.value.find((c) => c.id === conv.id)
-  if (target) await openConversation(target)
-}
-
 async function handlePrivateCreate(): Promise<void> {
   if (!peerUserId.value) return
   privateLoading.value = true
   try {
-    await openPrivateWith(peerUserId.value)
+    const conv = await conversationsApi.ensurePrivateConversation(peerUserId.value)
     privateVisible.value = false
+    await loadConversations()
+    const target = conversations.value.find((c) => c.id === conv.id)
+    if (target) await openConversation(target)
   } catch {
     // 提示由拦截器统一处理
   } finally {
@@ -173,14 +167,17 @@ async function handlePrivateCreate(): Promise<void> {
 
 /**
  * 入口接缝（线② 卡 E-1「私信 TA」）：带 /messages?peer=<userId> 进入时，
- * 直接打开（或新建）与该用户的私信会话。参数用完即清，避免刷新时重复发起。
+ * 直接打开（或新建）与该用户的私信会话。打开（或新建）本身幂等——已有会话直接定位，
+ * 所以刷新页面再次进入也不会多建会话。
  */
 async function openPeerFromRoute(): Promise<void> {
   const peer = route.query.peer
   if (typeof peer !== 'string' || !peer) return
-  void router.replace({ path: route.path })
   try {
-    await openPrivateWith(peer)
+    const conv = await conversationsApi.ensurePrivateConversation(peer)
+    await loadConversations()
+    const target = conversations.value.find((c) => c.id === conv.id)
+    if (target) await openConversation(target)
   } catch {
     // 不满足私信条件时提示由拦截器统一处理
   }
