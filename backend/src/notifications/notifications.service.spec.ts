@@ -1,9 +1,14 @@
+import type { Prisma } from '@prisma/client';
 import {
   NotificationsService,
   type PushNotificationInput,
 } from './notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ErrorCode } from '../common/result';
+
+/** 单测里的 tx 只是 notification 表的替身，传给 service 时按 Prisma 事务客户端看待 */
+const asTx = (tx: unknown): Prisma.TransactionClient =>
+  tx as Prisma.TransactionClient;
 
 /** notification 表一行快照 */
 function buildNotification(overrides: Record<string, unknown> = {}) {
@@ -141,6 +146,51 @@ describe('NotificationsService.push（冻结接口）', () => {
       ErrorCode.PARAM_INVALID,
       'toUserId 需为合法 id',
     );
+  });
+});
+
+describe('NotificationsService.pushInTransaction（卡 E-2 接缝）', () => {
+  it('在调用方事务内写入，校验与写入口径和 push 一致', async () => {
+    const { service, prisma } = createService();
+    const tx = { notification: { create: jest.fn() } };
+    tx.notification.create.mockResolvedValue(buildNotification());
+
+    const item = await service.pushInTransaction(asTx(tx), {
+      toUserId: '1',
+      type: 'team_apply_approved',
+      title: '爱丽丝 通过了你加入《互联网+项目》的申请',
+      refType: 'community_post',
+      refId: '5',
+    });
+
+    // 写入走的是调用方的事务客户端，不走 prisma（否则不在同一事务里）
+    expect(tx.notification.create).toHaveBeenCalledWith({
+      data: {
+        userId: 1n,
+        type: 'team_apply_approved',
+        title: '爱丽丝 通过了你加入《互联网+项目》的申请',
+        refType: 'community_post',
+        refId: 5n,
+      },
+    });
+    expect(prisma.notification.create).not.toHaveBeenCalled();
+    expect(item).toMatchObject({ id: '11', isRead: 0, refId: '5' });
+  });
+
+  it('非法入参在写库前被拦下', async () => {
+    const { service } = createService();
+    const tx = { notification: { create: jest.fn() } };
+
+    await expectBizError(
+      service.pushInTransaction(asTx(tx), {
+        toUserId: '1',
+        type: 'unknown_type' as PushNotificationInput['type'],
+        title: '标题',
+      }),
+      ErrorCode.PARAM_INVALID,
+      '未知通知类型：unknown_type',
+    );
+    expect(tx.notification.create).not.toHaveBeenCalled();
   });
 });
 
