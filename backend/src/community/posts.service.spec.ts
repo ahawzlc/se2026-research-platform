@@ -46,6 +46,12 @@ function createService() {
       update: jest.fn(),
     },
     communityTag: { findMany: jest.fn() },
+    // 卡 E-2：帖子结构里的 myApplication / pendingCount，以及删除前的待处理申请计数
+    teamApplication: {
+      findMany: jest.fn().mockResolvedValue([]),
+      groupBy: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
+    },
   };
   const prisma = {
     ...delegates,
@@ -431,6 +437,105 @@ describe('CommunityPostsService.remove', () => {
 
     await expectBizError(service.remove('1', '5'), 403, '仅发帖人可执行此操作');
     expect(tx.communityPost.update).not.toHaveBeenCalled();
+  });
+
+  it('还有待处理申请 → 409 并提示条数，不删除（卡 E-2）', async () => {
+    const { service, prisma, tx } = createService();
+    prisma.communityPost.findFirst.mockResolvedValue(buildPost());
+    prisma.teamApplication.count.mockResolvedValue(2);
+
+    await expectBizError(
+      service.remove('1', '5'),
+      409,
+      '还有 2 条待处理申请，请先处理后再删除',
+    );
+    // 只数未删除的待处理申请；已通过 / 已拒绝的不阻塞删除
+    expect(prisma.teamApplication.count).toHaveBeenCalledWith({
+      where: { postId: 5n, status: 'pending', deleted: 0 },
+    });
+    expect(tx.communityPost.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('CommunityPostsService 与当前用户相关的字段（卡 E-2）', () => {
+  /** team_application 表一行快照 */
+  function buildApplication(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 31n,
+      postId: 5n,
+      userId: 9n,
+      note: '我会前端',
+      status: 'pending',
+      handledBy: null,
+      handledAt: null,
+      createdAt: new Date('2026-11-24T01:00:00Z'),
+      updatedAt: new Date('2026-11-24T01:00:00Z'),
+      deleted: 0,
+      ...overrides,
+    };
+  }
+
+  it('发帖人看到待处理申请数；我的申请按帖子回填', async () => {
+    const { service, prisma } = createService();
+    prisma.communityPost.count.mockResolvedValue(2);
+    prisma.communityPost.findMany.mockResolvedValue([
+      withRelations(buildPost()),
+      withRelations(buildPost({ id: 4n, userId: 2n })),
+    ]);
+    // 我（用户 1）对帖子 4 提过申请、已被拒绝；帖子 5 是我发的，有 3 条待处理
+    prisma.teamApplication.findMany.mockResolvedValue([
+      buildApplication({ id: 40n, postId: 4n, status: 'rejected' }),
+    ]);
+    prisma.teamApplication.groupBy.mockResolvedValue([
+      { postId: 5n, _count: { _all: 3 } },
+    ]);
+
+    const result = await service.list('1', {});
+
+    expect(prisma.teamApplication.findMany).toHaveBeenCalledWith({
+      where: { userId: 1n, postId: { in: [5n, 4n] }, deleted: 0 },
+    });
+    // 待处理数只统计我自己发的帖子
+    expect(prisma.teamApplication.groupBy).toHaveBeenCalledWith({
+      by: ['postId'],
+      where: { postId: { in: [5n] }, status: 'pending', deleted: 0 },
+      _count: { _all: true },
+    });
+    expect(result.list[0]).toMatchObject({
+      id: '5',
+      isAuthor: true,
+      myApplication: null,
+      pendingCount: 3,
+    });
+    expect(result.list[1]).toMatchObject({
+      id: '4',
+      isAuthor: false,
+      pendingCount: 0,
+      myApplication: {
+        id: '40',
+        status: 'rejected',
+        note: '我会前端',
+        createdAt: '2026-11-24 09:00:00',
+        handledAt: '',
+      },
+    });
+  });
+
+  it('查看他人帖子且没有发过帖：不发起待处理数统计', async () => {
+    const { service, prisma } = createService();
+    prisma.communityPost.count.mockResolvedValue(1);
+    prisma.communityPost.findMany.mockResolvedValue([
+      withRelations(buildPost({ userId: 2n })),
+    ]);
+
+    const result = await service.list('1', {});
+
+    expect(prisma.teamApplication.groupBy).not.toHaveBeenCalled();
+    expect(result.list[0]).toMatchObject({
+      isAuthor: false,
+      myApplication: null,
+      pendingCount: 0,
+    });
   });
 });
 

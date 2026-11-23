@@ -25,3 +25,14 @@ export const POST_TAG_MIN = 1;
 export const POST_TAG_MAX = 3;
 /** community_tag.name VARCHAR(50) */
 export const TAG_NAME_MAX = 50;
+
+/** 申请状态：pending 待处理 / approved 已通过 / rejected 已拒绝（不可逆） */
+export const APPLICATION_STATUSES = [
+  'pending',
+  'approved',
+  'rejected',
+] as const;
+export type ApplicationStatus = (typeof APPLICATION_STATUSES)[number];
+
+/** team_application.note VARCHAR(200) */
+export const APPLICATION_NOTE_MAX = 200;

@@ -1,10 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import type { Prisma } from '@prisma/client';
+import type { Prisma, TeamApplication } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BizException } from '../common/result';
 import { formatDateTime, toIdString } from '../common/datetime';
-import { parseId } from '../common/team-access';
 import { RECRUIT_TOTAL_MIN } from './community.constants';
+import { requirePostAuthor, requireVisiblePost } from './post-access';
 import type { CreatePostDto, UpdatePostDto } from './dto/post.dto';
 import type { ListPostsQueryDto } from './dto/list-posts.query';
 
@@ -23,6 +23,17 @@ export interface PostAuthor {
   avatar: string;
 }
 
+/** 当前用户在该帖的申请（卡 E-2）：决定「申请加入」按钮的状态 */
+export interface MyApplicationItem {
+  id: string;
+  /** pending 待处理 / approved 已通过 / rejected 已拒绝 */
+  status: string;
+  note: string;
+  createdAt: string;
+  /** 未处理时为空字符串 */
+  handledAt: string;
+}
+
 /** 帖子结构（发布、编辑、列表项、详情同构，见 docs/01「组队广场」） */
 export interface CommunityPostItem {
   id: string;
@@ -38,6 +49,10 @@ export interface CommunityPostItem {
   team: { id: string; name: string } | null;
   /** 当前用户是否发帖人 */
   isAuthor: boolean;
+  /** 当前用户在该帖的申请，未申请为 null */
+  myApplication: MyApplicationItem | null;
+  /** 待处理申请数：只对发帖人统计，其他人恒为 0 */
+  pendingCount: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -66,7 +81,7 @@ const POST_INCLUDE = {
 } satisfies Prisma.CommunityPostInclude;
 
 /**
- * 组队帖子服务（任务卡 E-1，线②）。
+ * 组队帖子服务（任务卡 E-1 / E-2，线②）。
  *
  * 约定：
  *   - 社区是平台第一个跨组公开内容：广场对全站登录用户可见，
@@ -141,7 +156,7 @@ export class CommunityPostsService {
       }),
     ]);
     return {
-      list: rows.map((row) => this.toItem(row, userId)),
+      list: await this.toItems(rows, userId),
       total,
       page,
       size,
@@ -150,7 +165,7 @@ export class CommunityPostsService {
 
   /** 帖子详情：全站登录用户可见，已删除按 404 处理 */
   async detail(userId: string, idParam: string): Promise<CommunityPostItem> {
-    const post = await this.requirePost(idParam);
+    const post = await requireVisiblePost(this.prisma, idParam);
     return this.requireItem(post.id, userId);
   }
 
@@ -168,8 +183,8 @@ export class CommunityPostsService {
     ) {
       throw BizException.param('请至少提供要修改的字段');
     }
-    const post = await this.requirePost(idParam);
-    this.requireAuthor(post, userId);
+    const post = await requireVisiblePost(this.prisma, idParam);
+    requirePostAuthor(post, userId);
     if (post.status !== 'recruiting') {
       throw BizException.conflict('帖子已停止招募或已满员，不可编辑');
     }
@@ -202,8 +217,8 @@ export class CommunityPostsService {
 
   /** 停止招募：仅发帖人；招募中 / 已满员均可转入「已停止」，终态不可重复 */
   async close(userId: string, idParam: string): Promise<CommunityPostItem> {
-    const post = await this.requirePost(idParam);
-    this.requireAuthor(post, userId);
+    const post = await requireVisiblePost(this.prisma, idParam);
+    requirePostAuthor(post, userId);
     if (post.status === 'closed') {
       throw BizException.conflict('帖子已停止招募');
     }
@@ -214,10 +229,22 @@ export class CommunityPostsService {
     return this.requireItem(post.id, userId);
   }
 
-  /** 逻辑删除：广场与详情立即不可见，已组建的课题组不受影响 */
+  /**
+   * 逻辑删除：广场与详情立即不可见，已组建的课题组不受影响。
+   * 还有待处理申请时不允许删除（409）——否则申请人的申请随帖子一起无处可查、永远等不到结果；
+   * 只想停止接新申请应使用「停止招募」。
+   */
   async remove(userId: string, idParam: string): Promise<void> {
-    const post = await this.requirePost(idParam);
-    this.requireAuthor(post, userId);
+    const post = await requireVisiblePost(this.prisma, idParam);
+    requirePostAuthor(post, userId);
+    const pending = await this.prisma.teamApplication.count({
+      where: { postId: post.id, status: 'pending', deleted: 0 },
+    });
+    if (pending > 0) {
+      throw BizException.conflict(
+        `还有 ${pending} 条待处理申请，请先处理后再删除`,
+      );
+    }
     await this.prisma.communityPost.update({
       where: { id: post.id },
       data: { deleted: 1 },
@@ -293,27 +320,6 @@ export class CommunityPostsService {
     }
   }
 
-  /** 路径 id 统一校验：不存在、已删除、非法一律 404 */
-  private async requirePost(idParam: string) {
-    const id = parseId(idParam);
-    const post = id
-      ? await this.prisma.communityPost.findFirst({
-          where: { id, deleted: 0 },
-        })
-      : null;
-    if (!post) {
-      throw BizException.notFound('帖子不存在');
-    }
-    return post;
-  }
-
-  /** 改删权限：仅作者本人（发帖人） */
-  private requireAuthor(post: { userId: bigint }, userId: string): void {
-    if (post.userId !== BigInt(userId)) {
-      throw BizException.forbidden('仅发帖人可执行此操作');
-    }
-  }
-
   /** 按完整关系回读一条帖子（写操作后的返回值） */
   private async requireItem(
     postId: bigint,
@@ -327,10 +333,68 @@ export class CommunityPostsService {
     if (!row) {
       throw BizException.notFound('帖子不存在');
     }
-    return this.toItem(row, userId);
+    return (await this.toItems([row], userId))[0];
   }
 
-  private toItem(row: PostWithRelations, userId: string): CommunityPostItem {
+  /**
+   * 补上与当前用户相关的两个字段（卡 E-2），两次批量查询，不逐帖查库：
+   *   - myApplication：当前用户在各帖的申请（每人每帖至多一条，唯一键保证）；
+   *   - pendingCount：待处理申请数，只统计当前用户自己发的帖子。
+   */
+  private async toItems(
+    rows: PostWithRelations[],
+    userId: string,
+  ): Promise<CommunityPostItem[]> {
+    if (rows.length === 0) {
+      return [];
+    }
+    const viewerId = BigInt(userId);
+    const ownIds = rows.filter((row) => row.userId === viewerId);
+    const [applications, pending] = await Promise.all([
+      this.prisma.teamApplication.findMany({
+        where: {
+          userId: viewerId,
+          postId: { in: rows.map((row) => row.id) },
+          deleted: 0,
+        },
+      }),
+      ownIds.length > 0
+        ? this.prisma.teamApplication.groupBy({
+            by: ['postId'],
+            where: {
+              postId: { in: ownIds.map((row) => row.id) },
+              status: 'pending',
+              deleted: 0,
+            },
+            _count: { _all: true },
+          })
+        : [],
+    ]);
+    const mine = new Map(
+      applications.map((row) => [row.postId.toString(), row]),
+    );
+    const pendingByPost = new Map(
+      pending.map((row) => [row.postId.toString(), row._count._all]),
+    );
+
+    return rows.map((row) =>
+      this.toItem(
+        row,
+        viewerId,
+        mine.get(row.id.toString()) ?? null,
+        row.userId === viewerId
+          ? (pendingByPost.get(row.id.toString()) ?? 0)
+          : 0,
+      ),
+    );
+  }
+
+  private toItem(
+    row: PostWithRelations,
+    viewerId: bigint,
+    myApplication: TeamApplication | null,
+    pendingCount: number,
+  ): CommunityPostItem {
     return {
       id: toIdString(row.id),
       title: row.title,
@@ -351,7 +415,17 @@ export class CommunityPostsService {
       team: row.team
         ? { id: toIdString(row.team.id), name: row.team.name }
         : null,
-      isAuthor: row.userId === BigInt(userId),
+      isAuthor: row.userId === viewerId,
+      myApplication: myApplication
+        ? {
+            id: toIdString(myApplication.id),
+            status: myApplication.status,
+            note: myApplication.note,
+            createdAt: formatDateTime(myApplication.createdAt),
+            handledAt: formatDateTime(myApplication.handledAt),
+          }
+        : null,
+      pendingCount,
       createdAt: formatDateTime(row.createdAt),
       updatedAt: formatDateTime(row.updatedAt),
     };

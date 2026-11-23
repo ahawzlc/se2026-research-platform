@@ -10,8 +10,11 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CommunityPostsService } from './posts.service';
+import { CommunityApplicationsService } from './applications.service';
 import { CreatePostDto, UpdatePostDto } from './dto/post.dto';
 import { ListPostsQueryDto } from './dto/list-posts.query';
+import { ApplyPostDto } from './dto/apply-post.dto';
+import { ListApplicationsQueryDto } from './dto/list-applications.query';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { CurrentUserPayload } from '../common/decorators/current-user.decorator';
 
@@ -19,7 +22,10 @@ import type { CurrentUserPayload } from '../common/decorators/current-user.decor
 @ApiBearerAuth('bearer')
 @Controller('community')
 export class CommunityController {
-  constructor(private readonly posts: CommunityPostsService) {}
+  constructor(
+    private readonly posts: CommunityPostsService,
+    private readonly applications: CommunityApplicationsService,
+  ) {}
 
   @Get('tags')
   @ApiOperation({ summary: '标签字典（竞赛 / 课程两类）' })
@@ -67,8 +73,46 @@ export class CommunityController {
   }
 
   @Delete('posts/:id')
-  @ApiOperation({ summary: '删除帖子（仅发帖人，逻辑删除）' })
+  @ApiOperation({
+    summary: '删除帖子（仅发帖人，逻辑删除；还有待处理申请时 409）',
+  })
   remove(@CurrentUser() user: CurrentUserPayload, @Param('id') id: string) {
     return this.posts.remove(user.userId, id);
+  }
+
+  @Post('posts/:id/apply')
+  @ApiOperation({
+    summary: '申请加入（仅「招募中」的他人帖子，每人每帖至多一条）',
+  })
+  apply(
+    @CurrentUser() user: CurrentUserPayload,
+    @Param('id') id: string,
+    @Body() dto: ApplyPostDto,
+  ) {
+    return this.applications.apply(user.userId, id, dto);
+  }
+
+  @Get('posts/:id/applications')
+  @ApiOperation({ summary: '该帖的申请列表（分页；仅发帖人）' })
+  listApplications(
+    @CurrentUser() user: CurrentUserPayload,
+    @Param('id') id: string,
+    @Query() query: ListApplicationsQueryDto,
+  ) {
+    return this.applications.list(user.userId, id, query);
+  }
+
+  @Post('applications/:id/approve')
+  @ApiOperation({
+    summary: '通过申请（仅发帖人）：自动建组入组、进度 +1、招满转「已满员」',
+  })
+  approve(@CurrentUser() user: CurrentUserPayload, @Param('id') id: string) {
+    return this.applications.approve(user.userId, id);
+  }
+
+  @Post('applications/:id/reject')
+  @ApiOperation({ summary: '拒绝申请（仅发帖人）' })
+  reject(@CurrentUser() user: CurrentUserPayload, @Param('id') id: string) {
+    return this.applications.reject(user.userId, id);
   }
 }
