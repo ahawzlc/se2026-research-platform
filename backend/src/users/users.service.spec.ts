@@ -201,6 +201,17 @@ describe('UsersService.profileByUid', () => {
     });
   });
 
+  it('小写 UID 入参不报格式错（DTO 用 [Uu] 兼容，归一化在 service 层）', async () => {
+    const { service, prisma } = createService();
+    prisma.user.findFirst.mockResolvedValue(
+      buildUser({ id: 2n, publicUid: 'U0000000002' }),
+    );
+    prisma.friendship.findMany.mockResolvedValue([]);
+
+    const result = await service.profileByUid('1', 'u0000000002');
+    expect(result.id).toBe('2');
+  });
+
   it('UID 不存在 → 404', async () => {
     const { service, prisma } = createService();
     prisma.user.findFirst.mockResolvedValue(null);

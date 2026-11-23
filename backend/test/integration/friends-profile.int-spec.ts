@@ -285,6 +285,66 @@ maybe('个人主页与好友链真库集成（线③ 卡 E-3）', () => {
     }
   });
 
+  it('删除好友后可重新加（回归：唯一键不区分 deleted，必须复活旧行）', async () => {
+    // 先让 Alice 与 Carol 成为好友
+    const aliceUid = await uidOf(alice.token);
+    const requestId = await requestFriend(carol.token, aliceUid);
+    await request(app.getHttpServer())
+      .post(`/api/v1/friends/requests/${requestId}/accept`)
+      .set('Authorization', `Bearer ${alice.token}`)
+      .expect(201);
+
+    // 删除好友（逻辑删除）
+    await request(app.getHttpServer())
+      .delete(`/api/v1/friends/${carol.userId}`)
+      .set('Authorization', `Bearer ${alice.token}`)
+      .expect(200);
+
+    // 真库校验：行还在，只是 deleted=1（唯一键仍占着）
+    const softDeleted = await prisma.friendship.findFirst({
+      where: {
+        requesterId: BigInt(carol.userId),
+        addresseeId: BigInt(alice.userId),
+      },
+    });
+    expect(softDeleted?.deleted).toBe(1);
+
+    // 重新加：不得 500（create 新行会撞 uk_friendship）
+    const again = await request(app.getHttpServer())
+      .post('/api/v1/friends/requests')
+      .set('Authorization', `Bearer ${carol.token}`)
+      .send({ uid: aliceUid })
+      .expect(201);
+    expect(envelope<FriendBody>(again).code).toBe(0);
+
+    // 真库校验：仍是同一行，被复活成 pending
+    const rows = await prisma.friendship.findMany({
+      where: {
+        OR: [
+          {
+            requesterId: BigInt(carol.userId),
+            addresseeId: BigInt(alice.userId),
+          },
+          {
+            requesterId: BigInt(alice.userId),
+            addresseeId: BigInt(carol.userId),
+          },
+        ],
+      },
+    });
+    expect(rows.length).toBe(1);
+    expect(rows[0].status).toBe('pending');
+    expect(rows[0].deleted).toBe(0);
+
+    // 收尾：拒绝掉
+    await request(app.getHttpServer())
+      .post(
+        `/api/v1/friends/requests/${envelope<FriendBody>(again).data?.requestId}/reject`,
+      )
+      .set('Authorization', `Bearer ${alice.token}`)
+      .expect(201);
+  });
+
   // ---------------------------------------------------------------- 可见范围
 
   it('可见范围 private：他人看不到主页（403）', async () => {

@@ -210,6 +210,47 @@ describe('FriendsService.createRequest', () => {
       data: { status: 'pending', handledAt: null, deleted: 0 },
     });
   });
+
+  /**
+   * 回归：删除好友后重新加。
+   *
+   * `uk_friendship` 唯一键不区分 deleted，逻辑删除的行仍占着键——
+   * 若查找时按 `deleted: 0` 过滤，就会去 create 新行并撞唯一约束（500）。
+   * 故必须把已软删的行也找出来并复活。
+   */
+  it('删除好友后可重新加：复活已软删的行，不 create 新行', async () => {
+    const { service, prisma } = createService();
+    prisma.user.findFirst.mockResolvedValue(buildUser());
+    stubFriendshipLookup(prisma, {
+      outgoing: buildFriendship({ status: 'accepted', deleted: 1 }),
+    });
+    prisma.friendship.update.mockResolvedValue({});
+
+    await service.createRequest('1', { uid: 'U0000000002' });
+
+    expect(prisma.friendship.create).not.toHaveBeenCalled();
+    expect(prisma.friendship.update).toHaveBeenCalledWith({
+      where: { id: 50n },
+      data: { status: 'pending', handledAt: null, deleted: 0 },
+    });
+  });
+
+  it('已软删且状态仍是 pending 的行也可复活（不撞唯一键）', async () => {
+    const { service, prisma } = createService();
+    prisma.user.findFirst.mockResolvedValue(buildUser());
+    stubFriendshipLookup(prisma, {
+      outgoing: buildFriendship({ status: 'pending', deleted: 1 }),
+    });
+    prisma.friendship.update.mockResolvedValue({});
+
+    await service.createRequest('1', { uid: 'U0000000002' });
+
+    expect(prisma.friendship.create).not.toHaveBeenCalled();
+    expect(prisma.friendship.update).toHaveBeenCalledWith({
+      where: { id: 50n },
+      data: { status: 'pending', handledAt: null, deleted: 0 },
+    });
+  });
 });
 
 describe('FriendsService.acceptRequest', () => {

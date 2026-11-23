@@ -63,18 +63,24 @@ export async function areFriends(
 /**
  * 查询两人之间「我 → 对方」方向的那条关系（申请方是我）。
  *
- * 用于「我是否已申请过对方」的判定；拒绝后可再次申请（复用同一行改回 pending）。
+ * **注意：不按 `deleted` 过滤**——这是「删除好友后能否重新加」的关键。
+ * `uk_friendship(requester_id, addressee_id)` 是唯一键，逻辑删除只是把 `deleted` 置 1，
+ * **行还在、键还占着**。若查找时按 `deleted: 0` 过滤，删除过的好友会被当成「没有行」，
+ * 服务层去 create 新行就撞唯一约束（500）。故这里必须把已软删的行也找出来，
+ * 由调用方决定「复用改状态」还是「复活」。
+ *
+ * 返回值带 `deleted`，调用方据此判断这是活行还是已删行。
  */
 export async function findOutgoingFriendship(
   prisma: PrismaService,
   requesterId: bigint,
   addresseeId: bigint,
-): Promise<{ id: bigint; status: string } | null> {
+): Promise<{ id: bigint; status: string; deleted: number } | null> {
   const row = await prisma.friendship.findFirst({
-    where: { requesterId, addresseeId, deleted: 0 },
-    select: { id: true, status: true },
+    where: { requesterId, addresseeId },
+    select: { id: true, status: true, deleted: true },
   });
-  return row ? { id: row.id, status: row.status } : null;
+  return row ? { id: row.id, status: row.status, deleted: row.deleted } : null;
 }
 
 /**

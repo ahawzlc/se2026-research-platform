@@ -34,11 +34,11 @@ export class CreatePrivateConversationDto {
  * 故提供按 UID 的入口，服务层先解析 UID 再走既有的 private 会话流程。
  */
 export class OpenPrivateConversationByUidDto {
-  @ApiProperty({ description: '对方 UID，形如 U0000000123' })
+  @ApiProperty({ description: '对方 UID，形如 U0000000123（大小写均可）' })
   @IsString()
   @IsNotEmpty({ message: 'uid 不能为空' })
   @MaxLength(20, { message: 'uid 最长 20 个字符' })
-  @Matches(/^U\d{10}$/, {
+  @Matches(/^[Uu]\d{10}$/, {
     message: 'UID 格式不正确（应为 U 开头 + 10 位数字）',
   })
   uid!: string;

@@ -109,6 +109,8 @@ export class FriendsService {
    *   - 对方已申请我（存在反向 pending）→ 409，并提示可直接去同意；
    *   - 我之前申请过且被拒（rejected）→ 复用该行改回 pending（可再次申请）；
    *   - 我之前申请过且还在 pending → 409（同一行不可重复申请）；
+   *   - 我之前删除过这位好友（行还在，只是 deleted=1）→ **复活该行**改回 pending，
+   *     不能 create 新行——`uk_friendship` 唯一键不区分 deleted，新行必撞约束；
    *   - 全新 → 新建 pending 行。
    */
   async createRequest(
@@ -134,6 +136,7 @@ export class FriendsService {
     }
 
     // 反向 pending：对方已经申请过我 → 提示去处理，不要再插一行
+    // 注意同样不按 deleted 过滤：删过好友后行还在、键还占着
     const reverse = await this.prisma.friendship.findFirst({
       where: {
         requesterId: peer.id,
@@ -148,14 +151,18 @@ export class FriendsService {
       );
     }
 
-    // 我发起的方向：可能已存在（pending 待处理 / rejected 被拒可复用）
+    // 我发起的方向：可能已存在（pending 待处理 / rejected 被拒可复用 / deleted 已删可复活）
     const outgoing = await findOutgoingFriendship(this.prisma, me, peer.id);
     let requestId: bigint;
     if (outgoing) {
-      if (outgoing.status === FRIENDSHIP_STATUS.PENDING) {
+      if (
+        outgoing.deleted === 0 &&
+        outgoing.status === FRIENDSHIP_STATUS.PENDING
+      ) {
         throw BizException.conflict('好友申请已发出，等待对方处理');
       }
-      // rejected → 复用同一行改回 pending（唯一键不允许插第二行）
+      // rejected 或 deleted → 复用同一行改回 pending
+      // （唯一键 uk_friendship 不区分 deleted，create 新行会撞约束，故只能复用）
       await this.prisma.friendship.update({
         where: { id: outgoing.id },
         data: {
