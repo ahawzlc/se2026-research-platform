@@ -3,6 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { AuthService } from './auth.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { UsersService } from '../users/users.service';
 
 /** 用真实 bcrypt 造哈希（降成本到 4 轮，只验证调用链，不测加密强度本身） */
 const CORRECT_HASH = bcrypt.hashSync('Test1234', 4);
@@ -17,6 +18,7 @@ function buildUser(overrides: Record<string, unknown> = {}) {
     nickname: '张三',
     avatar: '',
     email: 'zhangsan@example.com',
+    publicUid: 'U0000000001',
     createdAt: new Date('2026-10-29T02:00:00Z'),
     updatedAt: new Date('2026-10-29T02:00:00Z'),
     deleted: 0,
@@ -32,12 +34,17 @@ function createService() {
   };
   const jwt = { signAsync: jest.fn().mockResolvedValue('token-abc') };
   const config = { get: jest.fn().mockReturnValue('604800') };
+  // 注册时要分配对外 UID（线③ 卡 E-3）
+  const users = {
+    allocatePublicUid: jest.fn().mockResolvedValue('U0000000001'),
+  };
   const service = new AuthService(
     jwt as unknown as JwtService,
     config as unknown as ConfigService,
     prisma as unknown as PrismaService,
+    users as unknown as UsersService,
   );
-  return { service, prisma, jwt };
+  return { service, prisma, jwt, users };
 }
 
 /** 断言抛出的 BizException 携带指定业务码与文案 */
@@ -101,12 +108,15 @@ describe('AuthService.register', () => {
       nickname: '张三',
       avatar: '',
       email: 'zhangsan@example.com',
+      publicUid: 'U0000000001',
     });
     // 入库的是哈希而非明文；JwtService 收到的是最终载荷（sub 为字符串）
     const createCalls = prisma.user.create.mock.calls as Array<
-      [{ data: { passwordHash: string } }]
+      [{ data: { passwordHash: string; publicUid: string } }]
     >;
     expect(createCalls[0][0].data.passwordHash).not.toBe('Test1234');
+    // 注册即分配对外 UID（线③ 卡 E-3）
+    expect(createCalls[0][0].data.publicUid).toBe('U0000000001');
     expect(jwt.signAsync).toHaveBeenCalledWith({
       sub: '1',
       username: 'zhangsan',

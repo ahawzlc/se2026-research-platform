@@ -3,6 +3,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -24,6 +25,23 @@ export class CreatePrivateConversationDto {
   @IsString()
   @IsNotEmpty({ message: 'peerUserId 不能为空' })
   peerUserId!: string;
+}
+
+/**
+ * 按 UID 打开/创建私信会话入参（线③ 卡 E-3）。
+ *
+ * 好友页点「发私信」时，前端手里只有对方的 UID（不暴露 user.id），
+ * 故提供按 UID 的入口，服务层先解析 UID 再走既有的 private 会话流程。
+ */
+export class OpenPrivateConversationByUidDto {
+  @ApiProperty({ description: '对方 UID，形如 U0000000123' })
+  @IsString()
+  @IsNotEmpty({ message: 'uid 不能为空' })
+  @MaxLength(20, { message: 'uid 最长 20 个字符' })
+  @Matches(/^U\d{10}$/, {
+    message: 'UID 格式不正确（应为 U 开头 + 10 位数字）',
+  })
+  uid!: string;
 }
 
 /** 发消息入参 */

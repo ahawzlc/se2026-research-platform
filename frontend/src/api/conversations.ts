@@ -51,9 +51,17 @@ export function ensureGroupConversation(projectId: string) {
   return http.post<ConversationItem>('/api/v1/conversations/group', { projectId })
 }
 
-/** 创建/获取私信会话（双方须在同一课题组） */
+/** 创建/获取私信会话（线③ 卡 E-3：不再要求同组；非好友每方向限发 1 条） */
 export function ensurePrivateConversation(peerUserId: string) {
   return http.post<ConversationItem>('/api/v1/conversations/private', { peerUserId })
+}
+
+/**
+ * 按 UID 打开/创建私信会话（线③ 卡 E-3）。
+ * 好友页与个人主页只有对方 UID，故提供按 UID 的入口。
+ */
+export function openPrivateConversationByUid(uid: string) {
+  return http.post<ConversationItem>('/api/v1/conversations/private-with', { uid })
 }
 
 /** 会话详情（含未读数） */

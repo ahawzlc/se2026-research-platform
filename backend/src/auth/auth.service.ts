@@ -7,6 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { BizException } from '../common/result';
 import { formatDateTime, toIdString } from '../common/datetime';
 import { isUniqueViolation } from '../common/prisma-errors';
+import { UsersService } from '../users/users.service';
 import type { RegisterDto } from './dto/register.dto';
 import type { LoginDto } from './dto/login.dto';
 import type { UpdateProfileDto } from './dto/update-profile.dto';
@@ -33,6 +34,8 @@ export interface SafeUser {
   nickname: string;
   avatar: string;
   email: string;
+  /** 对外展示的 UID（线③ 卡 E-3：注册时分配，创建后不可变） */
+  publicUid: string;
 }
 
 /** 注册 / 登录的成功返回：注册即登录态，前端 LoginResult 按此形状消费 */
@@ -63,6 +66,7 @@ export class AuthService {
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly users: UsersService,
   ) {}
 
   // ---------------------------------------------------------------- 令牌
@@ -108,6 +112,8 @@ export class AuthService {
           passwordHash,
           nickname: dto.nickname,
           email: dto.email ?? '',
+          // 对外 UID（线③ 卡 E-3）：注册即分配，唯一且创建后不可变
+          publicUid: await this.users.allocatePublicUid(),
         },
       });
     } catch (error) {
@@ -232,6 +238,7 @@ export class AuthService {
       nickname: user.nickname,
       avatar: user.avatar,
       email: user.email,
+      publicUid: user.publicUid ?? '',
     };
   }
 }

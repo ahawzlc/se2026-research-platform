@@ -3,11 +3,8 @@ import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BizException } from '../common/result';
 import { formatDateTime, toIdString } from '../common/datetime';
-import {
-  listUserTeamIds,
-  parseId,
-  requireTeamMembership,
-} from '../common/team-access';
+import { parseId, requireTeamMembership } from '../common/team-access';
+import { areFriends } from '../common/friendship-access';
 import type {
   CreateGroupConversationDto,
   CreatePrivateConversationDto,
@@ -54,7 +51,8 @@ export interface UnreadItem {
  *
  * B-3 任务评论与 C-5 协作消息共用本服务：
  *   - B-3 复用锚定评论（comment）：ensureAnchorConversation + postMessage；
- *   - C-5 补充 group / private 会话、未读汇总、标记已读。
+ *   - C-5 补充 group / private 会话、未读汇总、标记已读；
+ *   - 线③ 卡 E-3 调整 private 会话的可见性与发言限制。
  *
  * **消息零埋点**：docs/03 明确消息不计入参与度，本服务不写 activity_log。
  */
@@ -251,7 +249,18 @@ export class ConversationsService {
     return this.detailConversation(userId, conversationId.toString());
   }
 
-  /** 创建/获取私信会话：双方必须在同一个课题组 */
+  /**
+   * 创建/获取私信会话（线③ 卡 E-3 调整了权限口径）。
+   *
+   * **旧口径**：双方必须在同一课题组（docs/09 原红线 9 的过严版本）。
+   * **新口径**（本卡明确决策，用户 2026-11-23 拍板）：
+   *   - 任何登录用户都可以给任何其他登录用户发私信——不再要求同组，
+   *     因为"通过 UID 加好友→私信"是本卡的核心链路，若强制同组则加好友无意义；
+   *   - 但**非好友之间限制发言**：同一对非好友的私信会话里，
+   *     每个方向最多发 1 条（首次打招呼模式）；成为好友后解除限制。
+   *
+   * 这样既满足"任何人可发起搭话"，又避免陌生人刷屏骚扰。
+   */
   async ensurePrivateConversation(
     userId: string,
     dto: CreatePrivateConversationDto,
@@ -261,21 +270,13 @@ export class ConversationsService {
       throw BizException.param('peerUserId 非法');
     }
 
-    // 双方必须在同一个课题组
-    const myTeams = await listUserTeamIds(this.prisma, userId);
-    if (myTeams.length === 0) {
-      throw BizException.forbidden('请先加入课题组');
-    }
-    const peerMembership = await this.prisma.teamMember.findFirst({
-      where: {
-        userId: peerId,
-        teamId: { in: myTeams },
-        deleted: 0,
-      },
+    // 对方必须是真实存在的用户
+    const peer = await this.prisma.user.findFirst({
+      where: { id: peerId, deleted: 0 },
       select: { id: true },
     });
-    if (!peerMembership) {
-      throw BizException.forbidden('对方不在你的课题组中');
+    if (!peer) {
+      throw BizException.notFound('用户不存在');
     }
 
     // 查是否已有双方都在的 private 会话
@@ -308,6 +309,29 @@ export class ConversationsService {
     }
 
     return this.detailConversation(userId, conversationId.toString());
+  }
+
+  /**
+   * 按 UID 打开/创建与某用户的私信会话（线③ 卡 E-3）。
+   *
+   * 好友页与个人主页只有对方的 UID（不暴露 user.id），故先解析 UID 再走
+   * ensurePrivateConversation 的同一套逻辑，保证两条入口行为一致。
+   */
+  async openPrivateConversationByUid(
+    userId: string,
+    uid: string,
+  ): Promise<ConversationItem> {
+    const normalized = uid.trim().toUpperCase();
+    const peer = await this.prisma.user.findFirst({
+      where: { publicUid: normalized, deleted: 0 },
+      select: { id: true },
+    });
+    if (!peer) {
+      throw BizException.notFound('该 UID 不存在');
+    }
+    return this.ensurePrivateConversation(userId, {
+      peerUserId: peer.id.toString(),
+    });
   }
 
   /** 会话详情（含未读数；仅会话成员可看） */
@@ -395,6 +419,10 @@ export class ConversationsService {
    * 发消息：写 message + 刷新 conversation.updatedAt + 同步发送者 lastReadAt。
    *
    * **零埋点**：docs/03 明确消息不计入参与度，本方法不写 activity_log。
+   *
+   * **非好友限流（线③ 卡 E-3）**：private 会话中，若双方不是好友，
+   * 则每个方向最多发 1 条（首次打招呼模式）；成为好友后解除限制。
+   * 判定依据是「该方向已发出的消息条数」，与群聊/讨论区无关。
    */
   async sendConversationMessage(
     userId: string,
@@ -406,6 +434,8 @@ export class ConversationsService {
       idParam,
     );
     const senderId = BigInt(userId);
+
+    await this.assertMessageAllowed(conversationId, senderId);
 
     const message = await this.prisma.$transaction(async (tx) => {
       const created = await tx.message.create({
@@ -437,6 +467,53 @@ export class ConversationsService {
       msgType: message.msgType,
       createdAt: formatDateTime(message.createdAt),
     };
+  }
+
+  /**
+   * 非好友发言限制检查（线③ 卡 E-3）。
+   *
+   * 规则：private 会话中，若发送方与对方不是好友，
+   * 则该方向已发出的消息数必须 < 1（即最多 1 条）。
+   *
+   * 非 private 会话（group / comment / meeting）不受此限制。
+   */
+  private async assertMessageAllowed(
+    conversationId: bigint,
+    senderId: bigint,
+  ): Promise<void> {
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, deleted: 0 },
+      select: { type: true },
+    });
+    if (!conversation || conversation.type !== 'private') {
+      return; // 非私信不受限制
+    }
+
+    const peerMember = await this.prisma.conversationMember.findFirst({
+      where: {
+        conversationId,
+        userId: { not: senderId },
+        deleted: 0,
+      },
+      select: { userId: true },
+    });
+    if (!peerMember) {
+      return; // 找不到对方（异常数据），不拦
+    }
+
+    const friends = await areFriends(this.prisma, senderId, peerMember.userId);
+    if (friends) {
+      return; // 好友不受限
+    }
+
+    const sentCount = await this.prisma.message.count({
+      where: { conversationId, senderId, deleted: 0 },
+    });
+    if (sentCount >= 1) {
+      throw BizException.forbidden(
+        '你们还不是好友，每个方向只能发一条消息；加为好友后可自由交流',
+      );
+    }
   }
 
   /** 未读汇总：当前用户所有会话的未读数，供前端 30s 轮询 */

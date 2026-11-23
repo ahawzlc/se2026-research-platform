@@ -5,6 +5,7 @@ import {
   CreateGroupConversationDto,
   CreatePrivateConversationDto,
   ListMessagesQueryDto,
+  OpenPrivateConversationByUidDto,
   SendMessageDto,
 } from './dto/conversation.dto';
 import { ListConversationsQueryDto } from './dto/conversation-query.dto';
@@ -50,6 +51,21 @@ export class ConversationsController {
   })
   unread(@CurrentUser() user: CurrentUserPayload) {
     return this.conversations.listUnread(user.userId);
+  }
+
+  @Post('private-with')
+  @ApiOperation({
+    summary:
+      '按 UID 打开/创建与某用户的私信会话（好友页「发私信」入口，线③ 卡 E-3）',
+  })
+  openPrivateByUid(
+    @CurrentUser() user: CurrentUserPayload,
+    @Body() dto: OpenPrivateConversationByUidDto,
+  ) {
+    return this.conversations.openPrivateConversationByUid(
+      user.userId,
+      dto.uid,
+    );
   }
 
   @Get(':id')

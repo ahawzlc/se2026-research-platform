@@ -96,6 +96,30 @@ const routes: RouteRecordRaw[] = [
         name: 'notifications',
         component: () => import('@/views/NotificationsView.vue'),
         meta: { title: '通知中心' }
+      },
+      {
+        path: 'profile',
+        name: 'profile',
+        component: () => import('@/views/ProfileView.vue'),
+        meta: { title: '个人主页' }
+      },
+      {
+        path: 'profile/settings',
+        name: 'profile-settings',
+        component: () => import('@/views/ProfileSettingsView.vue'),
+        meta: { title: '账号与安全' }
+      },
+      {
+        path: 'profile/:userId',
+        name: 'user-profile',
+        component: () => import('@/views/ProfileView.vue'),
+        meta: { title: '个人主页' }
+      },
+      {
+        path: 'friends',
+        name: 'friends',
+        component: () => import('@/views/FriendsView.vue'),
+        meta: { title: '好友' }
       }
     ]
   },
