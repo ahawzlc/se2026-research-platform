@@ -1,6 +1,6 @@
 /**
  * 组队广场（线②，卡 E-1 / E-2）。接口契约见 docs/01「组队广场」：
- * 广场对全站登录用户可见；编辑 / 停止 / 删除仅发帖人可操作，由后端判定。
+ * 广场对全站登录用户可见；编辑 / 停止 / 删除 / 审批仅发帖人可操作，由后端判定。
  */
 import { http } from './request'
 import type { PageQuery, PageResult } from './types'
@@ -11,6 +11,9 @@ export type PostStatus = 'recruiting' | 'full' | 'closed'
 /** 标签类别：competition 竞赛 / course 课程 */
 export type TagCategory = 'competition' | 'course'
 
+/** 申请状态：pending 待处理 / approved 已通过 / rejected 已拒绝（不可逆） */
+export type ApplicationStatus = 'pending' | 'approved' | 'rejected'
+
 /** 标签（字典与帖子内嵌共用） */
 export interface CommunityTag {
   id: string
@@ -18,11 +21,21 @@ export interface CommunityTag {
   category: TagCategory
 }
 
-/** 发布人卡片：社区是跨组公开内容，只有昵称与头像 */
+/** 发布人 / 申请人的名片：社区是跨组公开内容，只有昵称与头像 */
 export interface PostAuthor {
   id: string
   nickname: string
   avatar: string
+}
+
+/** 当前用户在该帖的申请（卡 E-2），决定「申请加入」按钮的状态 */
+export interface MyApplication {
+  id: string
+  status: ApplicationStatus
+  note: string
+  createdAt: string
+  /** 未处理时为空字符串 */
+  handledAt: string
 }
 
 /** 帖子结构（发布、编辑、列表项、详情同构） */
@@ -40,8 +53,38 @@ export interface CommunityPostItem {
   team: { id: string; name: string } | null
   /** 当前用户是否发帖人 */
   isAuthor: boolean
+  /** 当前用户在该帖的申请，未申请为 null */
+  myApplication: MyApplication | null
+  /** 待处理申请数：仅发帖人有意义，其他人恒为 0 */
+  pendingCount: number
   createdAt: string
   updatedAt: string
+}
+
+/** 申请条目 */
+export interface ApplicationItem {
+  id: string
+  postId: string
+  status: ApplicationStatus
+  note: string
+  createdAt: string
+  /** 未处理时为空字符串 */
+  handledAt: string
+  applicant: PostAuthor
+}
+
+/** 审批（通过 / 拒绝）的响应 */
+export interface HandleResult {
+  application: ApplicationItem
+  /** 处理后的帖子进度与状态，前端据此就地刷新 */
+  post: {
+    recruitedCount: number
+    recruitTotal: number
+    status: PostStatus
+    team: { id: string; name: string } | null
+  }
+  /** 仅「本次审批自动创建了课题组」时返回：邀请码只在创建时给出一次 */
+  inviteCode?: string
 }
 
 export interface PostPayload {
@@ -59,6 +102,10 @@ export interface ListPostsQuery extends PageQuery {
   q?: string
   status?: PostStatus
   mine?: boolean
+}
+
+export interface ListApplicationsQuery extends PageQuery {
+  status?: ApplicationStatus
 }
 
 /** 标签字典（先竞赛后课程） */
@@ -91,7 +138,29 @@ export function closeCommunityPost(id: string) {
   return http.post<CommunityPostItem>(`/api/v1/community/posts/${id}/close`)
 }
 
-/** 删除帖子（仅发帖人，逻辑删除） */
+/** 删除帖子（仅发帖人，逻辑删除；还有待处理申请时后端返回 409） */
 export function deleteCommunityPost(id: string) {
   return http.delete<null>(`/api/v1/community/posts/${id}`)
+}
+
+/** 申请加入（仅「招募中」的他人帖子；每人每帖至多一条申请） */
+export function applyCommunityPost(postId: string, payload: { note?: string }) {
+  return http.post<ApplicationItem>(`/api/v1/community/posts/${postId}/apply`, payload)
+}
+
+/** 某帖的申请列表（仅发帖人；按 id 倒序） */
+export function fetchPostApplications(postId: string, query?: ListApplicationsQuery) {
+  return http.get<PageResult<ApplicationItem>>(`/api/v1/community/posts/${postId}/applications`, {
+    params: query
+  })
+}
+
+/** 通过申请：自动建组入组、进度 +1、招满转「已满员」 */
+export function approveApplication(id: string) {
+  return http.post<HandleResult>(`/api/v1/community/applications/${id}/approve`)
+}
+
+/** 拒绝申请 */
+export function rejectApplication(id: string) {
+  return http.post<HandleResult>(`/api/v1/community/applications/${id}/reject`)
 }

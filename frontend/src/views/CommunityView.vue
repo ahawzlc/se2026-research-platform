@@ -2,11 +2,18 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { communityApi } from '@/api'
-import type { CommunityPostItem, CommunityTag, PostStatus, TagCategory } from '@/api/community'
+import type {
+  ApplicationStatus,
+  CommunityPostItem,
+  CommunityTag,
+  PostStatus,
+  TagCategory
+} from '@/api/community'
 import PostFormDialog from '@/components/community/PostFormDialog.vue'
 
 /**
- * 组队广场（卡 E-1，线②）：卡片流浏览 + 标签/关键词/状态筛选 + 发布招募。
+ * 组队广场（卡 E-1 / E-2，线②）：卡片流浏览 + 标签/关键词/状态筛选 + 发布招募。
+ * 卡片上标出「我在这篇帖子上的申请进度」与自己帖子的「待处理申请数」。
  * 筛选条件随 URL 保存，从帖子详情返回时筛选不丢。
  */
 
@@ -15,6 +22,16 @@ const STATUS_META: Record<PostStatus, { label: string; tag: 'success' | 'warning
   recruiting: { label: '招募中', tag: 'success' },
   full: { label: '已满员', tag: 'warning' },
   closed: { label: '已停止', tag: 'info' }
+}
+
+/** 申请状态文案与标签配色（枚举与后端 APPLICATION_STATUSES 对齐） */
+const MY_APPLICATION_META: Record<
+  ApplicationStatus,
+  { label: string; tag: 'warning' | 'success' | 'info' }
+> = {
+  pending: { label: '已申请', tag: 'warning' },
+  approved: { label: '已通过', tag: 'success' },
+  rejected: { label: '已被拒绝', tag: 'info' }
 }
 
 /** 标签类别中文名，用于筛选项分组 */
@@ -236,12 +253,29 @@ onMounted(() => {
           @keydown.enter="openPost(post)"
         >
           <div class="post-card-head">
-            <el-tag :type="STATUS_META[post.status].tag" size="small" effect="light">
-              {{ STATUS_META[post.status].label }}
-            </el-tag>
-            <span class="post-progress">
-              已招 {{ post.recruitedCount }}/{{ post.recruitTotal }}
-            </span>
+            <div class="post-card-badges">
+              <el-tag :type="STATUS_META[post.status].tag" size="small" effect="light">
+                {{ STATUS_META[post.status].label }}
+              </el-tag>
+              <!-- 我在这篇帖子上的申请进度 -->
+              <el-tag
+                v-if="post.myApplication"
+                :type="MY_APPLICATION_META[post.myApplication.status].tag"
+                size="small"
+                effect="plain"
+              >
+                {{ MY_APPLICATION_META[post.myApplication.status].label }}
+              </el-tag>
+            </div>
+            <div class="post-card-meta">
+              <!-- 自己的帖子：有待处理的申请就标出来 -->
+              <span v-if="post.isAuthor && post.pendingCount > 0" class="pending-badge">
+                {{ post.pendingCount }} 条待处理
+              </span>
+              <span class="post-progress">
+                已招 {{ post.recruitedCount }}/{{ post.recruitTotal }}
+              </span>
+            </div>
           </div>
           <h3 class="post-title">{{ post.title }}</h3>
           <div v-if="post.tags.length > 0" class="post-tags">
@@ -337,6 +371,25 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+}
+
+.post-card-badges,
+.post-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.post-card-meta {
+  flex: none;
+  gap: 10px;
+}
+
+.pending-badge {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--el-color-danger);
 }
 
 .post-progress {
