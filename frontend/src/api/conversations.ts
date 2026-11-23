@@ -7,7 +7,7 @@ import { http } from './request'
 import type { PageQuery, PageResult } from './types'
 
 /** 会话类型（docs/02 conversation.type） */
-export type ConversationType = 'comment' | 'group' | 'private'
+export type ConversationType = 'comment' | 'group' | 'private' | 'meeting'
 
 /** 会话条目（含最后一条消息预览与未读数） */
 export interface ConversationItem {
@@ -33,6 +33,8 @@ export interface MessageItem {
   content: string
   msgType: string
   createdAt: string
+  refType?: string
+  refId?: string
 }
 
 /** 未读汇总条目（30s 轮询返回体） */
@@ -56,6 +58,11 @@ export function ensurePrivateConversation(peerUserId: string) {
   return http.post<ConversationItem>('/api/v1/conversations/private', { peerUserId })
 }
 
+/** 创建/获取会议讨论区，会话成员由后端按会议参会人同步。 */
+export function ensureMeetingConversation(meetingId: string) {
+  return http.post<ConversationItem>('/api/v1/conversations/meeting', { meetingId })
+}
+
 /** 会话详情（含未读数） */
 export function fetchConversation(id: string) {
   return http.get<ConversationItem>(`/api/v1/conversations/${id}`)
@@ -66,9 +73,16 @@ export function fetchMessages(id: string, limit = 50) {
   return http.get<MessageItem[]>(`/api/v1/conversations/${id}/messages`, { params: { limit } })
 }
 
-/** 发送消息（content 1–2000 字符；零埋点） */
-export function sendMessage(id: string, content: string) {
-  return http.post<MessageItem>(`/api/v1/conversations/${id}/messages`, { content })
+/** 发送消息；普通消息 1–2000 字符，录音 URL/信令允许更长；零埋点 */
+export function sendMessage(
+  id: string,
+  content: string,
+  options?: { msgType?: 'text' | 'audio' | 'call_signal'; refId?: string }
+) {
+  return http.post<MessageItem>(`/api/v1/conversations/${id}/messages`, {
+    content,
+    ...options
+  })
 }
 
 /** 未读消息汇总（前端 30s 轮询） */

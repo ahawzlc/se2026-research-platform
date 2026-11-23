@@ -85,6 +85,24 @@ export class NotificationsService {
     return this.toItem(created);
   }
 
+  /** 幂等推送：同一用户、类型、来源只保留一条未删除通知。 */
+  async pushOnce(input: PushNotificationInput): Promise<NotificationItem | null> {
+    const userId = this.asId(input.toUserId, 'toUserId');
+    const refId = input.refId === undefined ? undefined : this.asId(input.refId, 'refId');
+    const existing = await this.prisma.notification.findFirst({
+      where: {
+        userId,
+        type: input.type,
+        refType: input.refType,
+        refId,
+        deleted: 0,
+      },
+      orderBy: { id: 'desc' },
+    });
+    if (existing) return null;
+    return this.push({ ...input, toUserId: userId, ...(refId === undefined ? {} : { refId }) });
+  }
+
   /** 我的通知列表（按 id 倒序，可仅看未读） */
   async list(userIdParam: string, query: ListNotificationsQueryDto) {
     const userId = BigInt(userIdParam);

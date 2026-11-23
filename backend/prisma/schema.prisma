@@ -365,7 +365,7 @@ model ConversationMember {
   @@map("conversation_member")
 }
 
-/// 消息（无 updated_at）；msg_type: text / file / system
+/// 消息（无 updated_at）；msg_type: text / audio / call_signal / file / system
 model Message {
   id             BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
   conversationId BigInt   @map("conversation_id") @db.UnsignedBigInt

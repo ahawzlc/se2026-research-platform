@@ -31,6 +31,8 @@ export interface MeetingItem {
   title: string;
   /** 北京时间 yyyy-MM-dd HH:mm:ss；未填时为空串 */
   heldAt: string;
+  /** upcoming / ended / unscheduled，由 heldAt 推导，不入库。 */
+  status: 'upcoming' | 'ended' | 'unscheduled';
   location: string;
   content: string;
   attendees: AttendeeItem[];
@@ -442,6 +444,11 @@ export class MeetingsService {
       projectName: row.project.name,
       title: row.title,
       heldAt: formatDateTime(row.heldAt),
+      status: row.heldAt
+        ? row.heldAt.getTime() >= Date.now()
+          ? 'upcoming'
+          : 'ended'
+        : 'unscheduled',
       location: row.location ?? '',
       content: row.content ?? '',
       attendees: row.attendees.map((a) => ({

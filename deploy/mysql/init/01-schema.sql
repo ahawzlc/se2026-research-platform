@@ -307,7 +307,7 @@ CREATE TABLE `message` (
   `conversation_id` BIGINT UNSIGNED NOT NULL                COMMENT 'conversation.id',
   `sender_id`       BIGINT UNSIGNED NOT NULL                COMMENT '发送人 user.id',
   `content`         TEXT            NULL                    COMMENT '消息正文',
-  `msg_type`        VARCHAR(20)     NOT NULL DEFAULT 'text' COMMENT '消息类型：text / file / system',
+  `msg_type`        VARCHAR(20)     NOT NULL DEFAULT 'text' COMMENT '消息类型：text / audio / call_signal / file / system',
   `ref_type`        VARCHAR(30)     NULL                    COMMENT '消息级引用的对象类型',
   `ref_id`          BIGINT UNSIGNED NULL                    COMMENT '消息级引用的对象主键',
   `created_at`      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',

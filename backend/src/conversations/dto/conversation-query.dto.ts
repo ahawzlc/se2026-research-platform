@@ -3,7 +3,7 @@ import { IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 /** 会话类型（docs/02 conversation.type） */
-export const CONVERSATION_TYPES = ['comment', 'group', 'private'] as const;
+export const CONVERSATION_TYPES = ['comment', 'group', 'private', 'meeting'] as const;
 export type ConversationTypeValue = (typeof CONVERSATION_TYPES)[number];
 
 /** 会话列表查询参数 */

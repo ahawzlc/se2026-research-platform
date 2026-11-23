@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ConversationsService } from './conversations.service';
 import {
   CreateGroupConversationDto,
+  CreateMeetingConversationDto,
   CreatePrivateConversationDto,
   ListMessagesQueryDto,
   SendMessageDto,
@@ -42,6 +43,15 @@ export class ConversationsController {
     @Body() dto: CreatePrivateConversationDto,
   ) {
     return this.conversations.ensurePrivateConversation(user.userId, dto);
+  }
+
+  @Post('meeting')
+  @ApiOperation({ summary: '创建/获取会议讨论区，并同步会议参会人' })
+  ensureMeeting(
+    @CurrentUser() user: CurrentUserPayload,
+    @Body() dto: CreateMeetingConversationDto,
+  ) {
+    return this.conversations.ensureMeetingConversation(user.userId, dto);
   }
 
   @Get('unread')
@@ -85,6 +95,8 @@ export class ConversationsController {
       user.userId,
       id,
       dto.content,
+      dto.msgType,
+      dto.refId,
     );
   }
 

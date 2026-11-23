@@ -36,7 +36,7 @@ async function load() {
 
 function refTarget(item: NotificationItem): string {
   // 已知来源跳对应页面；community_post / friendship 待线②③页面落地后接入
-  if (item.refType === 'meeting') return '/meetings'
+  if (item.refType === 'meeting') return `/meetings?meetingId=${encodeURIComponent(item.refId)}`
   if (item.refType === 'conversation') return '/messages'
   return ''
 }
