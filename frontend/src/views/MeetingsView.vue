@@ -1,4 +1,5 @@
 ﻿<script setup lang="ts">
+/* global Blob, BlobPart, File, HTMLAudioElement, MediaRecorder, MediaStream, RTCPeerConnection, RTCIceCandidateInit, RTCSessionDescriptionInit, crypto */
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
