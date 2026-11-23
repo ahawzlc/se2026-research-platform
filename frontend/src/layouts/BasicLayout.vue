@@ -56,7 +56,8 @@ async function loadRecent(): Promise<void> {
 }
 
 function refTarget(item: NotificationItem): string {
-  // 已知来源跳对应页面；community_post / friendship 待线②③页面落地后接入
+  // 已知来源跳对应页面；friendship 待线③页面落地后接入
+  if (item.refType === 'community_post') return `/community/${item.refId}`
   if (item.refType === 'meeting') return '/meetings'
   if (item.refType === 'conversation') return '/messages'
   return ''
@@ -82,6 +83,7 @@ function goAllNotifications(): void {
 
 const menuItems = [
   { path: '/dashboard', title: '工作台' },
+  { path: '/community', title: '组队广场' },
   { path: '/overview', title: '项目概览' },
   { path: '/projects', title: '项目管理' },
   { path: '/tasks', title: '任务看板' },
@@ -94,7 +96,10 @@ const menuItems = [
   { path: '/members', title: '课题组成员' }
 ]
 
-const activeMenu = computed(() => route.path)
+// 子页面（如 /community/12）让所属菜单项保持高亮
+const activeMenu = computed(
+  () => menuItems.find((item) => route.path.startsWith(`${item.path}/`))?.path ?? route.path
+)
 const pageTitle = computed(() => route.meta.title ?? '')
 const displayName = computed(() => userStore.userInfo?.nickname || '未登录')
 
