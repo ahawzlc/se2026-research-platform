@@ -10,12 +10,7 @@ import { useUserStore } from '@/store/user'
 const TYPE_META: Record<ConversationType, { label: string; tag: 'info' | 'success' | 'warning' }> = {
   comment: { label: '任务评论', tag: 'info' },
   group: { label: '项目讨论区', tag: 'success' },
-  private: { label: '私信', tag: 'warning' },
-  meeting: { label: '会议讨论区', tag: 'success' }
-}
-
-function resolveMediaUrl(value: string): string {
-  return value.startsWith('http') ? value : `${window.location.origin}${value}`
+  private: { label: '私信', tag: 'warning' }
 }
 
 /** 未读轮询间隔：SRS 口径 30 秒（docs/01 已废弃旧 3–5 秒） */
@@ -296,8 +291,7 @@ onBeforeUnmount(() => {
           >
             <div class="msg-bubble">
               <div v-if="msg.senderId !== myUserId" class="msg-sender">{{ msg.senderName }}</div>
-              <audio v-if="msg.msgType === 'audio'" class="msg-audio" :src="resolveMediaUrl(msg.content)" controls />
-              <div v-else-if="msg.msgType !== 'call_signal'" class="msg-content">{{ msg.content }}</div>
+              <div class="msg-content">{{ msg.content }}</div>
               <div class="msg-time">{{ msg.createdAt }}</div>
             </div>
           </div>
@@ -544,10 +538,6 @@ onBeforeUnmount(() => {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-.msg-audio {
-  max-width: 240px;
 }
 
 .msg-time {

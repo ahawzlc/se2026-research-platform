@@ -10,13 +10,12 @@ import {
 } from '../common/team-access';
 import type {
   CreateGroupConversationDto,
-  CreateMeetingConversationDto,
   CreatePrivateConversationDto,
 } from './dto/conversation.dto';
 import type { ListConversationsQueryDto } from './dto/conversation-query.dto';
 
 /** 会话类型（docs/02 conversation.type） */
-export type ConversationType = 'comment' | 'group' | 'private' | 'meeting';
+export type ConversationType = 'comment' | 'group' | 'private';
 
 /** 对外暴露的消息条目 */
 export interface MessageItem {
@@ -26,8 +25,6 @@ export interface MessageItem {
   senderName: string;
   content: string;
   msgType: string;
-  refType: string;
-  refId: string;
   createdAt: string;
 }
 
@@ -149,8 +146,6 @@ export class ConversationsService {
       senderName: row.sender.nickname || row.sender.username,
       content: row.content ?? '',
       msgType: row.msgType,
-      refType: row.refType ?? '',
-      refId: toIdString(row.refId),
       createdAt: formatDateTime(row.createdAt),
     }));
   }
@@ -179,8 +174,6 @@ export class ConversationsService {
       senderName: row.sender.nickname || row.sender.username,
       content: row.content ?? '',
       msgType: row.msgType,
-      refType: row.refType ?? '',
-      refId: toIdString(row.refId),
       createdAt: formatDateTime(row.createdAt),
     };
   }
@@ -317,38 +310,6 @@ export class ConversationsService {
     return this.detailConversation(userId, conversationId.toString());
   }
 
-  /** 创建/获取会议讨论区，并将当前用户与所有有效参会人加入会话。 */
-  async ensureMeetingConversation(
-    userId: string,
-    dto: CreateMeetingConversationDto,
-  ): Promise<ConversationItem> {
-    const meetingId = parseId(dto.meetingId);
-    if (meetingId === null) throw BizException.notFound('会议不存在');
-    const meeting = await this.prisma.meeting.findFirst({
-      where: { id: meetingId, deleted: 0, project: { deleted: 0 } },
-      select: {
-        id: true,
-        title: true,
-        project: { select: { teamId: true } },
-        attendees: { where: { deleted: 0 }, select: { userId: true } },
-      },
-    });
-    if (!meeting) throw BizException.notFound('会议不存在');
-    await requireTeamMembership(this.prisma, meeting.project.teamId, userId);
-
-    const conversationId = await this.ensureAnchorConversation(
-      'meeting',
-      'meeting',
-      meeting.id,
-      `会议「${meeting.title}」讨论区`,
-    );
-    await this.ensureMember(conversationId, BigInt(userId));
-    for (const attendee of meeting.attendees) {
-      await this.ensureMember(conversationId, attendee.userId);
-    }
-    return this.detailConversation(userId, conversationId.toString());
-  }
-
   /** 会话详情（含未读数；仅会话成员可看） */
   async detailConversation(
     userId: string,
@@ -439,46 +400,16 @@ export class ConversationsService {
     userId: string,
     idParam: string,
     content: string,
-    msgType: 'text' | 'audio' | 'call_signal' = 'text',
-    refId?: string,
   ): Promise<MessageItem> {
     const conversationId = await this.requireMemberConversation(
       userId,
       idParam,
     );
     const senderId = BigInt(userId);
-    if (refId !== undefined && !/^\d+$/.test(refId)) {
-      throw BizException.param('refId 非法');
-    }
-    if (msgType === 'text' && content.length > 2000) {
-      throw BizException.param('普通消息最长 2000 个字符');
-    }
-
-    const conversation = await this.prisma.conversation.findFirst({
-      where: { id: conversationId, deleted: 0 },
-      select: { type: true, refType: true, refId: true },
-    });
-    // Prisma 实际只会返回对象或 null；undefined 兼容旧单测中未配置该 mock 的情形。
-    if (conversation === null) throw BizException.notFound('会话不存在');
-    if (conversation?.type === 'meeting' && conversation.refType === 'meeting') {
-      const meeting = await this.prisma.meeting.findFirst({
-        where: { id: conversation.refId ?? BigInt(-1), deleted: 0 },
-        select: { heldAt: true },
-      });
-      if (meeting?.heldAt && meeting.heldAt.getTime() < Date.now()) {
-        throw BizException.forbidden('会议已结束，讨论区只读');
-      }
-    }
 
     const message = await this.prisma.$transaction(async (tx) => {
       const created = await tx.message.create({
-        data: {
-          conversationId,
-          senderId,
-          content,
-          msgType,
-          ...(refId ? { refType: msgType === 'audio' ? 'file' : 'call', refId: BigInt(refId) } : {}),
-        },
+        data: { conversationId, senderId, content, msgType: 'text' },
         include: { sender: { select: { username: true, nickname: true } } },
       });
 
@@ -504,8 +435,6 @@ export class ConversationsService {
       senderName: message.sender.nickname || message.sender.username,
       content: message.content ?? '',
       msgType: message.msgType,
-      refType: message.refType ?? '',
-      refId: toIdString(message.refId),
       createdAt: formatDateTime(message.createdAt),
     };
   }

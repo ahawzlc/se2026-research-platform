@@ -1,5 +1,4 @@
 import {
-  IsIn,
   IsInt,
   IsNotEmpty,
   IsOptional,
@@ -27,31 +26,13 @@ export class CreatePrivateConversationDto {
   peerUserId!: string;
 }
 
-/** 创建/获取会议讨论区。会议成员由后端按会议参会人同步。 */
-export class CreateMeetingConversationDto {
-  @ApiProperty({ description: '会议 id' })
-  @IsString()
-  @IsNotEmpty({ message: 'meetingId 不能为空' })
-  meetingId!: string;
-}
-
 /** 发消息入参 */
 export class SendMessageDto {
-  @ApiProperty({ description: '消息正文；普通消息 1-2000 个字符，信令最多 20000 个字符' })
+  @ApiProperty({ description: '消息正文：1-2000 个字符' })
   @IsString()
   @IsNotEmpty({ message: '消息内容不能为空' })
-  @MaxLength(20000, { message: '消息最长 20000 个字符' })
+  @MaxLength(2000, { message: '消息最长 2000 个字符' })
   content!: string;
-
-  @ApiPropertyOptional({ enum: ['text', 'audio', 'call_signal'], default: 'text' })
-  @IsOptional()
-  @IsIn(['text', 'audio', 'call_signal'])
-  msgType?: 'text' | 'audio' | 'call_signal';
-
-  @ApiPropertyOptional({ description: '语音消息关联的文件 id' })
-  @IsOptional()
-  @IsString()
-  refId?: string;
 }
 
 /** 拉取消息查询参数 */
