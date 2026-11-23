@@ -1,11 +1,14 @@
 /**
- * 组队广场真库集成（线②，卡 E-1 帖子与标签）。
+ * 组队广场真库集成（线②，卡 E-1 帖子与标签 / 卡 E-2 申请与审批）。
  *
  * 真库验证点（mock 单测覆盖不到的）：
  *   - uk_community_post_tag(post_id, tag_id) 不过滤软删行：标签移除后再加回必须复用原行，
  *     直接 create 会撞唯一键；
  *   - 逻辑删除过滤真实生效：删帖后列表与详情不可见，行仍在库中；
- *   - 筛选 SQL 行为：多标签 some + in、关键词匹配标题或正文、分页的 count 与 list 一致。
+ *   - 筛选 SQL 行为：多标签 some + in、关键词匹配标题或正文、分页的 count 与 list 一致；
+ *   - 唯一约束兜底：uk_team_member / uk_team_application 在绕过 service 直接写入时真实拦截；
+ *   - 通过申请的原子事务：自动建组、入组、名额 +1、招满转态在库里同时成立；
+ *   - 并发防超招：只剩 1 个名额时两个审批请求同时到达，恰好一人通过、落败方事务回滚。
  *
  * 数据隔离：用户名前缀 t2c_ + 运行时间戳；用例标题带同一时间戳作为筛选标记；
  * 开场与收尾各清理一次（按外键依赖顺序物理删，仅测试代码允许物理删）。
@@ -41,6 +44,39 @@ interface PostItem {
   author: { id: string; nickname: string; avatar: string };
   team: { id: string; name: string } | null;
   isAuthor: boolean;
+  myApplication: { id: string; status: string } | null;
+  pendingCount: number;
+}
+
+interface ApplicationRow {
+  id: string;
+  postId: string;
+  status: string;
+  note: string;
+  createdAt: string;
+  handledAt: string;
+  applicant: { id: string; nickname: string };
+}
+
+/** 审批（通过 / 拒绝）的响应 */
+interface HandleResult {
+  application: ApplicationRow;
+  post: {
+    recruitedCount: number;
+    recruitTotal: number;
+    status: string;
+    team: { id: string; name: string } | null;
+  };
+  inviteCode?: string;
+}
+
+/** 通知条目（断言时只取关心的字段） */
+interface NoticeRow {
+  type: string;
+  title: string;
+  refType: string;
+  refId: string;
+  isRead: number;
 }
 
 interface User {
@@ -54,6 +90,9 @@ maybe('组队广场真库集成（线②）', () => {
   let prisma: PrismaService;
   let alice: User;
   let bob: User;
+  /** 另两位申请人：用于并发审批与满员后的申请 */
+  let carol: User;
+  let dave: User;
   /** 字典标签按名字取，不依赖种子 id 的顺序 */
   let tag: Record<'internet' | 'software' | 'modeling' | 'innovation', TagItem>;
 
@@ -65,9 +104,9 @@ maybe('组队广场真库集成（线②）', () => {
     return {
       get: (path: string) =>
         auth(request(server).get(`/api/v1/community${path}`)),
-      post: (path: string, body?: unknown) =>
+      post: (path: string, body?: Record<string, unknown>) =>
         auth(request(server).post(`/api/v1/community${path}`)).send(body),
-      put: (path: string, body?: unknown) =>
+      put: (path: string, body?: Record<string, unknown>) =>
         auth(request(server).put(`/api/v1/community${path}`)).send(body),
       del: (path: string) =>
         auth(request(server).delete(`/api/v1/community${path}`)),
@@ -97,7 +136,10 @@ maybe('组队广场真库集成（线②）', () => {
     );
   }
 
-  /** 物理清理本套件产生的数据（外键依赖顺序：关联 → 帖子 → 用户） */
+  /**
+   * 物理清理本套件产生的数据（仅测试代码允许物理删），按外键依赖顺序：
+   * 通知 → 申请 → 标签关联 → 帖子 → 组成员 → 课题组 → 用户。
+   */
   async function purge() {
     const users = await prisma.user.findMany({
       where: { username: { startsWith: PREFIX } },
@@ -110,10 +152,26 @@ maybe('组队广场真库集成（线②）', () => {
       select: { id: true },
     });
     const postIds = posts.map((post) => post.id);
+    const teams = await prisma.team.findMany({
+      where: { ownerId: { in: userIds } },
+      select: { id: true },
+    });
+    const teamIds = teams.map((team) => team.id);
+
+    await prisma.notification.deleteMany({
+      where: { userId: { in: userIds } },
+    });
+    await prisma.teamApplication.deleteMany({
+      where: { OR: [{ postId: { in: postIds } }, { userId: { in: userIds } }] },
+    });
     await prisma.communityPostTag.deleteMany({
       where: { postId: { in: postIds } },
     });
     await prisma.communityPost.deleteMany({ where: { id: { in: postIds } } });
+    await prisma.teamMember.deleteMany({
+      where: { OR: [{ teamId: { in: teamIds } }, { userId: { in: userIds } }] },
+    });
+    await prisma.team.deleteMany({ where: { id: { in: teamIds } } });
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });
   }
 
@@ -123,6 +181,8 @@ maybe('组队广场真库集成（线②）', () => {
     await purge();
     alice = await registerUser(app, `${PREFIX}a_${RUN}`);
     bob = await registerUser(app, `${PREFIX}b_${RUN}`);
+    carol = await registerUser(app, `${PREFIX}c_${RUN}`);
+    dave = await registerUser(app, `${PREFIX}d_${RUN}`);
 
     const res = await api(alice.token).get('/tags').expect(200);
     const all = envelope<TagItem[]>(res).data ?? [];
@@ -393,5 +453,425 @@ maybe('组队广场真库集成（线②）', () => {
     expect(
       await prisma.communityPost.findUnique({ where: { id: BigInt(item.id) } }),
     ).toMatchObject({ deleted: 1 });
+  });
+
+  // ================================================================ 卡 E-2 申请与审批
+
+  /** 社区模块之外的只读接口（课题组、通知中心） */
+  function outside(token: string, path: string) {
+    return request(app.getHttpServer())
+      .get(`/api/v1/${path}`)
+      .set('Authorization', `Bearer ${token}`);
+  }
+
+  /** 某用户的通知列表（按 id 倒序） */
+  async function noticesOf(user: User): Promise<NoticeRow[]> {
+    const res = await outside(user.token, 'notifications?size=50').expect(200);
+    return envelope<{ list: NoticeRow[] }>(res).data!.list;
+  }
+
+  async function detailOf(user: User, postId: string): Promise<PostItem> {
+    const res = await api(user.token).get(`/posts/${postId}`).expect(200);
+    return envelope<PostItem>(res).data!;
+  }
+
+  async function applyAs(
+    user: User,
+    postId: string,
+    note = '',
+  ): Promise<ApplicationRow> {
+    const res = await api(user.token)
+      .post(`/posts/${postId}/apply`, { note })
+      .expect(201);
+    return envelope<ApplicationRow>(res).data!;
+  }
+
+  /** 发帖人审批某条申请；不带状态断言，由调用方判断响应 */
+  function handle(
+    operator: User,
+    applicationId: string,
+    action: 'approve' | 'reject',
+  ) {
+    return api(operator.token).post(`/applications/${applicationId}/${action}`);
+  }
+
+  it('邀请码入组链：重复入组被拦且库内只有一行，无效邀请码 404', async () => {
+    const server = app.getHttpServer();
+    const created = envelope<{ id: string; inviteCode: string }>(
+      await request(server)
+        .post('/api/v1/teams')
+        .set('Authorization', `Bearer ${alice.token}`)
+        .send({ name: `IT邀请码组_${RUN}` })
+        .expect(201),
+    ).data!;
+    const join = (user: User, inviteCode: string) =>
+      request(server)
+        .post('/api/v1/teams/join')
+        .set('Authorization', `Bearer ${user.token}`)
+        .send({ inviteCode });
+
+    await join(bob, created.inviteCode).expect(201);
+    // 同一邀请码重复入组：service 查到已有成员，返回 409
+    const again = await join(bob, created.inviteCode).expect(409);
+    expect(envelope<null>(again).message).toBe('已在课题组中');
+    // 绕过 service 直接重复写入：由 uk_team_member(team_id, user_id) 真实拦截
+    await expect(
+      prisma.teamMember.create({
+        data: {
+          teamId: BigInt(created.id),
+          userId: BigInt(bob.userId),
+          role: 'member',
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'P2002' });
+    expect(
+      await prisma.teamMember.count({
+        where: { teamId: BigInt(created.id), userId: BigInt(bob.userId) },
+      }),
+    ).toBe(1);
+
+    // 无效邀请码 404（邀请码没有有效期：表结构无对应列，按 docs/02 设计）；格式非法 400
+    const invalid = await join(carol, 'ZZZZ9999').expect(404);
+    expect(envelope<null>(invalid).message).toBe('邀请码无效');
+    await join(carol, 'abc').expect(400);
+  });
+
+  it('申请 → 通知 → 审批通过 → 自动建组入组 → 进度 +1 全链路', async () => {
+    const title = `IT闭环_${RUN}`;
+    const post = await createPost(alice, {
+      title,
+      tagIds: [tag.software.id],
+      recruitTotal: 2,
+    });
+    const postId = BigInt(post.id);
+
+    // 申请人：提交申请说明
+    const application = await applyAs(bob, post.id, '我会前端');
+    expect(application).toMatchObject({
+      postId: post.id,
+      status: 'pending',
+      note: '我会前端',
+      handledAt: '',
+      applicant: { id: bob.userId, nickname: `测试-${bob.username}` },
+    });
+
+    // 真库：申请落库；发帖人收到 team_apply 通知，跳转来源指向帖子
+    expect(
+      await prisma.teamApplication.count({
+        where: { postId, userId: BigInt(bob.userId) },
+      }),
+    ).toBe(1);
+    expect((await noticesOf(alice))[0]).toMatchObject({
+      type: 'team_apply',
+      title: `测试-${bob.username} 申请加入你的帖子《${title}》`,
+      refType: 'community_post',
+      refId: post.id,
+      isRead: 0,
+    });
+
+    // 详情：申请人看到自己的申请状态；发帖人看到待处理数
+    expect((await detailOf(bob, post.id)).myApplication).toMatchObject({
+      id: application.id,
+      status: 'pending',
+    });
+    expect(await detailOf(alice, post.id)).toMatchObject({
+      pendingCount: 1,
+      recruitedCount: 0,
+      team: null,
+    });
+    const pending = envelope<{ list: ApplicationRow[] }>(
+      await api(alice.token)
+        .get(`/posts/${post.id}/applications?status=pending`)
+        .expect(200),
+    ).data!;
+    expect(pending.list.map((row) => row.id)).toEqual([application.id]);
+
+    // 通过：自动建组 + 入组 + 进度 +1
+    const approved = envelope<HandleResult>(
+      await handle(alice, application.id, 'approve').expect(201),
+    ).data!;
+    expect(approved.application).toMatchObject({
+      id: application.id,
+      status: 'approved',
+    });
+    expect(approved.post).toMatchObject({
+      recruitedCount: 1,
+      recruitTotal: 2,
+      status: 'recruiting',
+    });
+    // 课题组名称 = 帖子标题；首次建组随响应给出邀请码
+    const team = approved.post.team;
+    if (!team) throw new Error('首次通过后帖子应已绑定课题组');
+    expect(team.name).toBe(title);
+    expect(approved.inviteCode).toMatch(/^[A-HJKMNP-Z2-9]{8}$/);
+
+    // 真库：课题组（发帖人为组长）、申请人入组、帖子绑定课题组
+    const teamId = BigInt(team.id);
+    expect(
+      await prisma.team.findUnique({ where: { id: teamId } }),
+    ).toMatchObject({
+      name: title,
+      ownerId: BigInt(alice.userId),
+      inviteCode: approved.inviteCode,
+    });
+    const members = await prisma.teamMember.findMany({
+      where: { teamId, deleted: 0 },
+      select: { userId: true, role: true },
+    });
+    expect(members.map((m) => `${m.userId}:${m.role}`).sort()).toEqual(
+      [`${alice.userId}:owner`, `${bob.userId}:member`].sort(),
+    );
+    expect(
+      await prisma.communityPost.findUnique({ where: { id: postId } }),
+    ).toMatchObject({ teamId, recruitedCount: 1, status: 'recruiting' });
+
+    // 申请人收到通过通知；「我的课题组」里出现该组
+    expect((await noticesOf(bob))[0]).toMatchObject({
+      type: 'team_apply_approved',
+      title: `测试-${alice.username} 通过了你加入《${title}》的申请`,
+      refType: 'community_post',
+      refId: post.id,
+    });
+    const myTeams = envelope<Array<{ id: string; role: string }>>(
+      await outside(bob.token, 'teams/my').expect(200),
+    ).data!;
+    expect(myTeams).toContainEqual(
+      expect.objectContaining({ id: team.id, role: 'member' }),
+    );
+
+    // 状态机不可逆：同一申请重复审批 → 409，进度不重复累加
+    const repeat = await handle(alice, application.id, 'approve').expect(409);
+    expect(envelope<null>(repeat).message).toBe('该申请已处理');
+    expect(
+      await prisma.communityPost.findUnique({ where: { id: postId } }),
+    ).toMatchObject({ recruitedCount: 1 });
+  });
+
+  it('招满自动转「已满员」，后续申请被拒之门外', async () => {
+    const title = `IT满员_${RUN}`;
+    const post = await createPost(alice, {
+      title,
+      tagIds: [tag.modeling.id],
+      recruitTotal: 1,
+    });
+    const application = await applyAs(carol, post.id);
+
+    const approved = envelope<HandleResult>(
+      await handle(alice, application.id, 'approve').expect(201),
+    ).data!;
+    expect(approved.post).toMatchObject({
+      recruitedCount: 1,
+      recruitTotal: 1,
+      status: 'full',
+    });
+    // 真库：进度与状态同时落库
+    expect(
+      await prisma.communityPost.findUnique({ where: { id: BigInt(post.id) } }),
+    ).toMatchObject({ recruitedCount: 1, status: 'full' });
+
+    // 后来者：申请被拒之门外，且不落库
+    const late = await api(dave.token)
+      .post(`/posts/${post.id}/apply`, { note: '我也想来' })
+      .expect(409);
+    expect(envelope<null>(late).message).toBe('帖子已满员');
+    expect(
+      await prisma.teamApplication.count({
+        where: { postId: BigInt(post.id), userId: BigInt(dave.userId) },
+      }),
+    ).toBe(0);
+
+    // 广场与详情都显示「已满员」
+    expect(await detailOf(dave, post.id)).toMatchObject({
+      status: 'full',
+      recruitedCount: 1,
+      myApplication: null,
+    });
+    const listed = envelope<{ list: PostItem[] }>(
+      await api(dave.token)
+        .get(`/posts?q=${encodeURIComponent(title)}`)
+        .expect(200),
+    ).data!;
+    expect(listed.list.map((item) => item.status)).toEqual(['full']);
+  });
+
+  it('非发帖人查看 / 审批申请 → 403，数据不受影响', async () => {
+    const post = await createPost(alice, {
+      title: `IT越权_${RUN}`,
+      tagIds: [tag.innovation.id],
+      recruitTotal: 1,
+    });
+    const application = await applyAs(bob, post.id);
+
+    for (const res of [
+      await api(bob.token).get(`/posts/${post.id}/applications`),
+      await handle(bob, application.id, 'approve'),
+      await handle(carol, application.id, 'reject'),
+    ]) {
+      expect(res.status).toBe(403);
+      expect(envelope<null>(res).code).toBe(403);
+    }
+    // 真库：申请仍是待处理，帖子进度与课题组绑定都没动
+    expect(
+      await prisma.teamApplication.findUnique({
+        where: { id: BigInt(application.id) },
+      }),
+    ).toMatchObject({ status: 'pending', handledBy: null });
+    expect(
+      await prisma.communityPost.findUnique({ where: { id: BigInt(post.id) } }),
+    ).toMatchObject({ recruitedCount: 0, teamId: null });
+    // 不存在的申请 → 404
+    await handle(alice, '999999999', 'approve').expect(404);
+  });
+
+  it('并发审批不超招：只剩 1 个名额时两人同时被审批，恰好一人通过', async () => {
+    const post = await createPost(alice, {
+      title: `IT并发_${RUN}`,
+      tagIds: [tag.internet.id],
+      recruitTotal: 1,
+    });
+    const postId = BigInt(post.id);
+    const [first, second] = await Promise.all([
+      applyAs(bob, post.id),
+      applyAs(carol, post.id),
+    ]);
+
+    // 两个审批请求同时发出，拿到各自的响应再判断
+    const responses = await Promise.all(
+      [first, second].map((row) => handle(alice, row.id, 'approve')),
+    );
+    expect(responses.map((res) => res.status).sort()).toEqual([201, 409]);
+
+    // 真库：进度恰为 1 且已满员；落败一方的申请仍是待处理（其事务已回滚）
+    const row = await prisma.communityPost.findUnique({
+      where: { id: postId },
+    });
+    expect(row).toMatchObject({
+      recruitedCount: 1,
+      recruitTotal: 1,
+      status: 'full',
+    });
+    const applications = await prisma.teamApplication.findMany({
+      where: { postId },
+      orderBy: { id: 'asc' },
+    });
+    expect(applications.map((item) => item.status).sort()).toEqual([
+      'approved',
+      'pending',
+    ]);
+    // 课题组里只有发帖人与通过的那一位
+    if (row?.teamId === null || row?.teamId === undefined) {
+      throw new Error('已有人通过，帖子应已绑定课题组');
+    }
+    expect(
+      await prisma.teamMember.count({ where: { teamId: row.teamId } }),
+    ).toBe(2);
+
+    const loser = responses.find((res) => res.status === 409);
+    if (!loser) throw new Error('应恰有一个审批因名额不足被拒');
+    expect(envelope<null>(loser).message).toBe('帖子已满员，无法再通过申请');
+    // 落败的申请此时再审批仍是 409（已满员），但可以改为拒绝
+    const loserId = applications.find((item) => item.status === 'pending');
+    if (!loserId) throw new Error('落败申请应仍为待处理');
+    await handle(alice, loserId.id.toString(), 'approve').expect(409);
+    await handle(alice, loserId.id.toString(), 'reject').expect(201);
+  });
+
+  it('拒绝后不能再次申请同一帖：状态校验与唯一键双保险', async () => {
+    const title = `IT拒绝_${RUN}`;
+    const post = await createPost(alice, {
+      title,
+      tagIds: [tag.software.id],
+      recruitTotal: 2,
+    });
+    const postId = BigInt(post.id);
+    const application = await applyAs(bob, post.id);
+
+    const rejected = envelope<HandleResult>(
+      await handle(alice, application.id, 'reject').expect(201),
+    ).data!;
+    expect(rejected.application.status).toBe('rejected');
+    // 拒绝不影响帖子：进度与课题组都不动
+    expect(rejected.post).toEqual({
+      recruitedCount: 0,
+      recruitTotal: 2,
+      status: 'recruiting',
+      team: null,
+    });
+    expect((await noticesOf(bob))[0]).toMatchObject({
+      type: 'team_apply_rejected',
+      title: `测试-${alice.username} 拒绝了你加入《${title}》的申请`,
+      refType: 'community_post',
+      refId: post.id,
+    });
+
+    // 第一道保险：service 状态校验 → 409
+    const again = await api(bob.token)
+      .post(`/posts/${post.id}/apply`, { note: '再试试' })
+      .expect(409);
+    expect(envelope<null>(again).message).toBe('申请已被拒绝，不能再次申请');
+    // 第二道保险：绕过 service 直接写入，由 uk_team_application(post_id, user_id) 拦截
+    await expect(
+      prisma.teamApplication.create({
+        data: { postId, userId: BigInt(bob.userId), note: '' },
+      }),
+    ).rejects.toMatchObject({ code: 'P2002' });
+    expect(
+      await prisma.teamApplication.count({
+        where: { postId, userId: BigInt(bob.userId) },
+      }),
+    ).toBe(1);
+    // 详情里「已被拒绝」所依据的状态
+    expect((await detailOf(bob, post.id)).myApplication).toMatchObject({
+      id: application.id,
+      status: 'rejected',
+    });
+  });
+
+  it('停止招募后不再接新申请但可处理存量申请；有待处理申请时不能删帖', async () => {
+    const title = `IT存量_${RUN}`;
+    const post = await createPost(alice, {
+      title,
+      tagIds: [tag.modeling.id],
+      recruitTotal: 2,
+    });
+    const application = await applyAs(bob, post.id);
+    await api(alice.token).post(`/posts/${post.id}/close`).expect(201);
+
+    // 新申请被拒之门外
+    const late = await api(carol.token)
+      .post(`/posts/${post.id}/apply`, {})
+      .expect(409);
+    expect(envelope<null>(late).message).toBe('帖子已停止招募');
+    // 存量申请还没处理：不能删帖
+    const blocked = await api(alice.token).del(`/posts/${post.id}`).expect(409);
+    expect(envelope<null>(blocked).message).toBe(
+      '还有 1 条待处理申请，请先处理后再删除',
+    );
+    expect(
+      await prisma.communityPost.findUnique({ where: { id: BigInt(post.id) } }),
+    ).toMatchObject({ deleted: 0 });
+
+    // 存量申请仍可通过；帖子保持「已停止」
+    const approved = envelope<HandleResult>(
+      await handle(alice, application.id, 'approve').expect(201),
+    ).data!;
+    expect(approved.post).toMatchObject({
+      recruitedCount: 1,
+      status: 'closed',
+    });
+
+    // 处理完即可删帖；已组建的课题组不受影响
+    const closedTeam = approved.post.team;
+    if (!closedTeam) throw new Error('存量申请通过后帖子应已绑定课题组');
+    await api(alice.token).del(`/posts/${post.id}`).expect(200);
+    expect(
+      await prisma.communityPost.findUnique({ where: { id: BigInt(post.id) } }),
+    ).toMatchObject({ deleted: 1 });
+    expect(
+      await prisma.teamMember.count({
+        where: { teamId: BigInt(closedTeam.id) },
+      }),
+    ).toBe(2);
+    await api(bob.token).get(`/posts/${post.id}`).expect(404);
   });
 });

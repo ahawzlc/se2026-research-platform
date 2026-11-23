@@ -26,6 +26,15 @@ interface TagItem {
   category: string;
 }
 
+/** 申请条目（断言时只取关心的字段） */
+interface ApplicationRow {
+  id: string;
+  postId: string;
+  status: string;
+  note: string;
+  handledAt: string;
+}
+
 /**
  * 组队广场 HTTP 层验收（卡 E-1）：真实 JWT / DTO / Service，替身数据库。
  *
@@ -59,6 +68,22 @@ describe('组队广场 (e2e)', () => {
   const tx = {
     communityPost: { create: jest.fn(), update: jest.fn() },
     communityPostTag: { createMany: jest.fn() },
+    teamApplication: { create: jest.fn(), updateMany: jest.fn() },
+    // 申请 / 审批会在同一事务里经真实的 NotificationsService 写通知
+    notification: {
+      create: jest.fn().mockResolvedValue({
+        id: 50n,
+        userId: 2n,
+        type: 'team_apply',
+        title: '张三 申请加入你的帖子《互联网+项目招前端》',
+        refType: 'community_post',
+        refId: 5n,
+        isRead: 0,
+        createdAt: new Date('2026-11-24T01:00:00Z'),
+        updatedAt: new Date('2026-11-24T01:00:00Z'),
+        deleted: 0,
+      }),
+    },
   };
   const prisma = {
     ...tx,
@@ -70,6 +95,16 @@ describe('组队广场 (e2e)', () => {
     },
     communityPostTag: { ...tx.communityPostTag, findMany: jest.fn() },
     communityTag: { findMany: jest.fn() },
+    // 帖子结构里的 myApplication / pendingCount 走两次批量查询，默认返回「没申请过」
+    teamApplication: {
+      ...tx.teamApplication,
+      findFirst: jest.fn(),
+      findFirstOrThrow: jest.fn(),
+      count: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
+      groupBy: jest.fn().mockResolvedValue([]),
+    },
+    user: { findFirstOrThrow: jest.fn() },
     $transaction: jest.fn((callback: (client: typeof tx) => unknown) =>
       callback(tx),
     ),
@@ -123,6 +158,11 @@ describe('组队广场 (e2e)', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // clearAllMocks 不复位返回值：把用例里互相覆盖过的几处复位，保证每条用例起点一致
+    prisma.communityPost.findFirst.mockResolvedValue(null);
+    prisma.teamApplication.findFirst.mockResolvedValue(null);
+    prisma.teamApplication.findMany.mockResolvedValue([]);
+    prisma.teamApplication.groupBy.mockResolvedValue([]);
   });
 
   it('未登录访问广场接口返回 401 与业务错误码', async () => {
@@ -166,7 +206,11 @@ describe('组队广场 (e2e)', () => {
 
   it('发帖 DTO：标签必选 1-3 个且不可重复，非法入参一律 400', async () => {
     const valid = { title: '毕业设计组队', tagIds: ['1'] };
-    const cases: Array<{ name: string; body: unknown; keyword: string }> = [
+    const cases: Array<{
+      name: string;
+      body: Record<string, unknown>;
+      keyword: string;
+    }> = [
       { name: '无标签', body: { title: valid.title }, keyword: 'tagIds' },
       {
         name: '空标签数组',
@@ -247,7 +291,7 @@ describe('组队广场 (e2e)', () => {
   });
 
   it('编辑 DTO：至少传一个字段，传入字段的规则与发布一致', async () => {
-    const edit = async (body: unknown, keyword: string) => {
+    const edit = async (body: Record<string, unknown>, keyword: string) => {
       const res = await authed('put', '/posts/5').send(body);
       expect(res.status).toBe(400);
       expect(envelope<null>(res).message).toContain(keyword);
@@ -339,5 +383,174 @@ describe('组队广场 (e2e)', () => {
     }
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(tx.communityPost.update).not.toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------- 卡 E-2 申请与审批
+
+  /** 申请一行（带申请人），供回读返回 */
+  const applicationRow = {
+    id: 31n,
+    postId: 5n,
+    userId: 1n,
+    note: '我会前端',
+    status: 'pending',
+    handledBy: null,
+    handledAt: null,
+    createdAt: new Date('2026-11-24T01:00:00Z'),
+    updatedAt: new Date('2026-11-24T01:00:00Z'),
+    deleted: 0,
+    applicant: { id: 1n, nickname: '张三', avatar: '' },
+  };
+
+  it('申请说明超长 / 多余字段 → 400；申请列表的状态与分页越界 → 400', async () => {
+    const tooLong = await authed('post', '/posts/5/apply').send({
+      note: '长'.repeat(201),
+    });
+    expect(tooLong.status).toBe(400);
+    expect(envelope<null>(tooLong).message).toContain('最长 200');
+
+    const extra = await authed('post', '/posts/5/apply').send({
+      note: '你好',
+      status: 'approved',
+    });
+    expect(envelope<null>(extra).message).toContain('should not exist');
+
+    for (const query of ['status=open', 'size=101', 'page=0']) {
+      const res = await authed('get', `/posts/5/applications?${query}`);
+      expect(res.status).toBe(400);
+    }
+    // 被拦截的请求不触达数据层
+    expect(prisma.communityPost.findFirst).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('申请自己的帖子 → 400；已满员 / 已停止 → 409', async () => {
+    prisma.communityPost.findFirst.mockResolvedValue(postRow);
+    const own = await authed('post', '/posts/5/apply').send({ note: '我来' });
+    expect(own.status).toBe(400);
+    expect(envelope<null>(own).message).toBe('不能申请自己的帖子');
+
+    for (const [status, message] of [
+      ['full', '帖子已满员'],
+      ['closed', '帖子已停止招募'],
+    ] as const) {
+      prisma.communityPost.findFirst.mockResolvedValue({
+        ...postRow,
+        userId: 2n,
+        status,
+      });
+      const res = await authed('post', '/posts/5/apply').send({});
+      expect(res.status).toBe(409);
+      expect(envelope<null>(res).message).toBe(message);
+    }
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('申请成功：说明去首尾空白后落库，返回待处理的申请条目', async () => {
+    prisma.communityPost.findFirst.mockResolvedValue({
+      ...postRow,
+      userId: 2n,
+      recruitedCount: 0,
+    });
+    prisma.teamApplication.findFirst.mockResolvedValue(null);
+    prisma.user.findFirstOrThrow.mockResolvedValue({ nickname: '张三' });
+    tx.teamApplication.create.mockResolvedValue({ id: 31n });
+    prisma.teamApplication.findFirstOrThrow.mockResolvedValue(applicationRow);
+
+    const res = await authed('post', '/posts/5/apply')
+      .send({ note: ' 我会前端 ' })
+      .expect(201);
+
+    expect(tx.teamApplication.create).toHaveBeenCalledWith({
+      data: { postId: 5n, userId: 1n, note: '我会前端' },
+      select: { id: true },
+    });
+    // 通知发帖人与申请在同一事务里，经 NotificationsService 写入（跳转来源指向帖子）
+    expect(tx.notification.create).toHaveBeenCalledWith({
+      data: {
+        userId: 2n,
+        type: 'team_apply',
+        title: '张三 申请加入你的帖子《互联网+项目招前端》',
+        refType: 'community_post',
+        refId: 5n,
+      },
+    });
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(envelope<ApplicationRow>(res).data).toMatchObject({
+      id: '31',
+      postId: '5',
+      status: 'pending',
+      note: '我会前端',
+      handledAt: '',
+    });
+  });
+
+  it('已有申请（待处理 / 已通过 / 已拒绝）→ 409，不写入第二条', async () => {
+    prisma.communityPost.findFirst.mockResolvedValue({
+      ...postRow,
+      userId: 2n,
+    });
+    for (const status of ['pending', 'approved', 'rejected']) {
+      prisma.teamApplication.findFirst.mockResolvedValue({ status });
+      const res = await authed('post', '/posts/5/apply').send({});
+      expect(res.status).toBe(409);
+    }
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(tx.teamApplication.create).not.toHaveBeenCalled();
+  });
+
+  it('非发帖人查看申请列表 / 审批 → 403', async () => {
+    prisma.communityPost.findFirst.mockResolvedValue({
+      ...postRow,
+      userId: 2n,
+    });
+    const list = await authed('get', '/posts/5/applications');
+    expect(list.status).toBe(403);
+    expect(prisma.teamApplication.findMany).not.toHaveBeenCalled();
+
+    prisma.teamApplication.findFirst.mockResolvedValue(applicationRow);
+    for (const action of ['approve', 'reject']) {
+      const res = await authed('post', `/applications/31/${action}`);
+      expect(res.status).toBe(403);
+      expect(envelope<null>(res).code).toBe(403);
+    }
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('发帖人查看申请列表：按状态过滤并返回分页信封', async () => {
+    prisma.communityPost.findFirst.mockResolvedValue(postRow);
+    prisma.teamApplication.count.mockResolvedValue(1);
+    prisma.teamApplication.findMany.mockResolvedValue([applicationRow]);
+
+    const res = await authed(
+      'get',
+      '/posts/5/applications?status=pending',
+    ).expect(200);
+    const page = envelope<{
+      total: number;
+      list: Array<{ id: string; status: string }>;
+    }>(res);
+    expect(page.data).toMatchObject({ total: 1, page: 1, size: 20 });
+    expect(page.data?.list[0]).toMatchObject({ id: '31', status: 'pending' });
+    expect(prisma.teamApplication.count).toHaveBeenCalledWith({
+      where: { postId: 5n, deleted: 0, status: 'pending' },
+    });
+  });
+
+  it('审批不存在的申请 → 404；申请已处理 → 409', async () => {
+    prisma.teamApplication.findFirst.mockResolvedValue(null);
+    const missing = await authed('post', '/applications/31/approve');
+    expect(missing.status).toBe(404);
+    expect(envelope<null>(missing).message).toBe('申请不存在');
+
+    prisma.teamApplication.findFirst.mockResolvedValue({
+      ...applicationRow,
+      status: 'approved',
+    });
+    prisma.communityPost.findFirst.mockResolvedValue(postRow);
+    const done = await authed('post', '/applications/31/approve');
+    expect(done.status).toBe(409);
+    expect(envelope<null>(done).message).toBe('该申请已处理');
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 });
