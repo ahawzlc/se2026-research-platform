@@ -49,7 +49,10 @@ function createService() {
       create: jest.fn(),
       update: jest.fn(),
       updateMany: jest.fn(),
+      deleteMany: jest.fn(),
     },
+    // 真实 Prisma 的 $transaction 接收 PrismaPromise 数组，等价于 Promise.all
+    $transaction: jest.fn((ops: unknown[]) => Promise.all(ops)),
   };
   const notifications = { push: jest.fn() };
   const service = new FriendsService(
@@ -60,20 +63,23 @@ function createService() {
 }
 
 /**
- * 让 friendship.findFirst 按查询条件返回不同的行。
+ * 让 friendship 查询按 where 的具体取值分派。
  *
- * 服务层在一次调用里会问三个不同的问题（areFriends / 反向 pending / 我发起的方向），
- * 用 mockResolvedValueOnce 按顺序返回容易错位，故按 where 的具体取值分派：
- *   - status==='accepted'        → areFriends 查询
- *   - requester=对方 & addressee=我 → 反向 pending 查询
- *   - requester=我 & addressee=对方 → 我发起的方向
+ * 服务层会问三类问题，故按 where 形状分派：
+ *   - `findFirst` + status==='accepted'  → areFriends（是否已是好友）
+ *   - `findMany` + where 只有 OR        → listFriendshipsBetween（两人之间的全部关系行，双向）
+ *   - `findMany` + status==='accepted'  → listFriends（好友列表）
  */
 function stubFriendshipLookup(
-  prisma: { friendship: { findFirst: jest.Mock } },
+  prisma: {
+    friendship: { findFirst: jest.Mock; findMany: jest.Mock };
+  },
   rules: {
     accepted?: Record<string, unknown> | null;
-    reversePending?: Record<string, unknown> | null;
-    outgoing?: Record<string, unknown> | null;
+    /** 两人之间的全部关系行（双向，含软删） */
+    rows?: Record<string, unknown>[];
+    /** listFriends 用的好友行 */
+    friendRows?: Record<string, unknown>[];
   },
 ): void {
   const ME = 1n;
@@ -84,13 +90,31 @@ function stubFriendshipLookup(
       if (where.status === 'accepted') {
         return Promise.resolve(rules.accepted ?? null);
       }
-      if (where.requesterId === PEER && where.addresseeId === ME) {
-        return Promise.resolve(rules.reversePending ?? null);
-      }
-      if (where.requesterId === ME && where.addresseeId === PEER) {
-        return Promise.resolve(rules.outgoing ?? null);
-      }
       return Promise.resolve(null);
+    },
+  );
+  prisma.friendship.findMany.mockImplementation(
+    (args: { where: Record<string, unknown> }) => {
+      const where = args.where;
+      if (where.status === 'accepted') {
+        return Promise.resolve(rules.friendRows ?? []);
+      }
+      if (where.OR) {
+        // listFriendshipsBetween：双向查 (ME,PEER) 与 (PEER,ME)
+        const orList = where.OR as Array<Record<string, unknown>>;
+        const wanted = new Set(
+          orList.map(
+            (o) => `${String(o.requesterId)}:${String(o.addresseeId)}`,
+          ),
+        );
+        const matched = (rules.rows ?? []).filter((row) =>
+          wanted.has(`${String(row.requesterId)}:${String(row.addresseeId)}`),
+        );
+        void ME;
+        void PEER;
+        return Promise.resolve(matched);
+      }
+      return Promise.resolve([]);
     },
   );
 }
@@ -167,11 +191,13 @@ describe('FriendsService.createRequest', () => {
     const { service, prisma } = createService();
     prisma.user.findFirst.mockResolvedValue(buildUser());
     stubFriendshipLookup(prisma, {
-      reversePending: buildFriendship({
-        requesterId: 2n,
-        addresseeId: 1n,
-        status: 'pending',
-      }),
+      rows: [
+        buildFriendship({
+          requesterId: 2n,
+          addresseeId: 1n,
+          status: 'pending',
+        }),
+      ],
     });
     await expectBizError(
       service.createRequest('1', { uid: 'U0000000002' }),
@@ -185,7 +211,7 @@ describe('FriendsService.createRequest', () => {
     const { service, prisma } = createService();
     prisma.user.findFirst.mockResolvedValue(buildUser());
     stubFriendshipLookup(prisma, {
-      outgoing: buildFriendship({ status: 'pending' }),
+      rows: [buildFriendship({ status: 'pending' })],
     });
     await expectBizError(
       service.createRequest('1', { uid: 'U0000000002' }),
@@ -198,7 +224,7 @@ describe('FriendsService.createRequest', () => {
     const { service, prisma } = createService();
     prisma.user.findFirst.mockResolvedValue(buildUser());
     stubFriendshipLookup(prisma, {
-      outgoing: buildFriendship({ status: 'rejected' }),
+      rows: [buildFriendship({ status: 'rejected' })],
     });
     prisma.friendship.update.mockResolvedValue({});
 
@@ -207,7 +233,13 @@ describe('FriendsService.createRequest', () => {
     expect(prisma.friendship.create).not.toHaveBeenCalled();
     expect(prisma.friendship.update).toHaveBeenCalledWith({
       where: { id: 50n },
-      data: { status: 'pending', handledAt: null, deleted: 0 },
+      data: {
+        requesterId: 1n,
+        addresseeId: 2n,
+        status: 'pending',
+        handledAt: null,
+        deleted: 0,
+      },
     });
   });
 
@@ -222,7 +254,7 @@ describe('FriendsService.createRequest', () => {
     const { service, prisma } = createService();
     prisma.user.findFirst.mockResolvedValue(buildUser());
     stubFriendshipLookup(prisma, {
-      outgoing: buildFriendship({ status: 'accepted', deleted: 1 }),
+      rows: [buildFriendship({ status: 'accepted', deleted: 1 })],
     });
     prisma.friendship.update.mockResolvedValue({});
 
@@ -231,7 +263,13 @@ describe('FriendsService.createRequest', () => {
     expect(prisma.friendship.create).not.toHaveBeenCalled();
     expect(prisma.friendship.update).toHaveBeenCalledWith({
       where: { id: 50n },
-      data: { status: 'pending', handledAt: null, deleted: 0 },
+      data: {
+        requesterId: 1n,
+        addresseeId: 2n,
+        status: 'pending',
+        handledAt: null,
+        deleted: 0,
+      },
     });
   });
 
@@ -239,7 +277,7 @@ describe('FriendsService.createRequest', () => {
     const { service, prisma } = createService();
     prisma.user.findFirst.mockResolvedValue(buildUser());
     stubFriendshipLookup(prisma, {
-      outgoing: buildFriendship({ status: 'pending', deleted: 1 }),
+      rows: [buildFriendship({ status: 'pending', deleted: 1 })],
     });
     prisma.friendship.update.mockResolvedValue({});
 
@@ -248,7 +286,80 @@ describe('FriendsService.createRequest', () => {
     expect(prisma.friendship.create).not.toHaveBeenCalled();
     expect(prisma.friendship.update).toHaveBeenCalledWith({
       where: { id: 50n },
-      data: { status: 'pending', handledAt: null, deleted: 0 },
+      data: {
+        requesterId: 1n,
+        addresseeId: 2n,
+        status: 'pending',
+        handledAt: null,
+        deleted: 0,
+      },
+    });
+  });
+
+  /**
+   * 回归（真库集成测试发现的）：唯一键 `uk_friendship(requester, addressee)` **有方向**，
+   * 所以 A→B 与 B→A 是两个不同的键。若不双向查，A 申请过 B 之后 B 再申请 A
+   * 会插第二行，产生「一对用户两行」的脏数据。
+   *
+   * 故：两人之间已有行时必须**复用并翻转方向**，并物理删除多余的重复行。
+   */
+  it('对方之前申请过我：复用那一行并翻转方向，不插第二行', async () => {
+    const { service, prisma } = createService();
+    prisma.user.findFirst.mockResolvedValue(buildUser());
+    stubFriendshipLookup(prisma, {
+      rows: [
+        buildFriendship({
+          requesterId: 2n,
+          addresseeId: 1n,
+          status: 'rejected',
+        }),
+      ],
+    });
+    prisma.friendship.update.mockResolvedValue({});
+
+    await service.createRequest('1', { uid: 'U0000000002' });
+
+    expect(prisma.friendship.create).not.toHaveBeenCalled();
+    expect(prisma.friendship.update).toHaveBeenCalledWith({
+      where: { id: 50n },
+      data: {
+        requesterId: 1n,
+        addresseeId: 2n,
+        status: 'pending',
+        handledAt: null,
+        deleted: 0,
+      },
+    });
+  });
+
+  it('两人之间存在重复行：物理删除多余行，只留一行', async () => {
+    const { service, prisma } = createService();
+    prisma.user.findFirst.mockResolvedValue(buildUser());
+    stubFriendshipLookup(prisma, {
+      rows: [
+        buildFriendship({
+          id: 50n,
+          requesterId: 1n,
+          addresseeId: 2n,
+          status: 'rejected',
+        }),
+        buildFriendship({
+          id: 51n,
+          requesterId: 2n,
+          addresseeId: 1n,
+          status: 'rejected',
+        }),
+      ],
+    });
+    prisma.friendship.update.mockResolvedValue({});
+    prisma.friendship.deleteMany.mockResolvedValue({ count: 1 });
+
+    await service.createRequest('1', { uid: 'U0000000002' });
+
+    expect(prisma.friendship.create).not.toHaveBeenCalled();
+    // 多余的那行被物理删除（唯一键不区分 deleted，软删腾不出键）
+    expect(prisma.friendship.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: [51n] } },
     });
   });
 });

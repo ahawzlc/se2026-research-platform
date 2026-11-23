@@ -6,23 +6,42 @@
  *
  * ## friendship 表的数据模型（G-0 已建，本卡只读不改结构）
  *
- * 单向行表示一条关系：requester 发起方、addressee 接收方，
- * 唯一键 uk_friendship(requester_id, addressee_id) 挡住重复申请。
+ * ```sql
+ * uk_friendship (requester_id, addressee_id)   -- 唯一键
+ * ```
  *
- * **本卡对状态机的约定**（与 G-0 建表注释一致）：
- *   - 发起申请：写入/复用一行 (A→B)，status=pending；
- *   - 同意：**把那一行 pending 直接改成 accepted**，不另起一行——
- *     否则同一对用户会出现 pending/accepted 两行，判定"是否好友"时要同时看两个方向，
- *     容易出现"两边都 accepted"的脏状态；
- *   - 拒绝：同一行改成 rejected；对方可再次发起，复用该行改回 pending
- *     （这正是 G-0 注释里"可再次发起：复用本行改回 pending"的意思）。
+ * **注意这个唯一键是有方向的**：`uk_friendship(A, B)` 与 `uk_friendship(B, A)`
+ * 是两个不同的键。也就是说，若 A 申请过 B、B 又申请过 A，**会落两行**——
+ * 表结构允许，但业务上不应出现（否则「是否好友」要同时看两个方向，
+ * 且任一方向被软删后另一个方向还活着，状态会打架）。
  *
- * 由此，「A 与 B 是好友」= 存在一行 status=accepted 且
- * (requester=A 且 addressee=B) 或 (requester=B 且 addressee=A)。
+ * ## 本卡定的规则：**一对用户只有一行**
  *
- * **不变式**：同一对用户至多存在一行 accepted。
- *   服务层在「发起申请」前会先查 areFriends，已是好友则拒绝再次申请，
- *   从而保证不会同时存在 (A→B) 与 (B→A) 两行 accepted。
+ * 每次发起申请前，先用 `listFriendshipsBetween` 查**双向**（(A,B) 与 (B,A) 都要查），
+ * 命中就复用那一行；没命中才 create。于是：
+ *
+ * - 一对用户在任何时刻**至多存在一行**（不变量）；
+ * - 该行的 `requester_id / addressee_id` 记录的是**当前这次申请的方向**
+ *   （发起方 / 接收方），状态流转不改变方向语义：
+ *   ```
+ *   发起申请 → 该行 status=pending（若原本不存在则新建，requester=发起方）
+ *   同意     → status=accepted（不新起一行）
+ *   拒绝     → status=rejected
+ *   再次申请 → 复用该行：status=pending + deleted=0，方向改为新的发起方
+ *   删除好友 → 该行 deleted=1（逻辑删除，双方同时不可见）
+ *   ```
+ * - 「A 与 B 是好友」= 存在一行 `status=accepted` 且
+ *   `(requester=A 且 addressee=B)` 或 `(requester=B 且 addressee=A)`。
+ *
+ * ## 与逻辑删除的交互（真库集成测试踩过的坑）
+ *
+ * `uk_friendship` **不区分 `deleted`**——逻辑删除只是把 `deleted` 置 1，
+ * 行还在、键还占着。故：
+ * - 查找复用行时**不能**按 `deleted: 0` 过滤，否则把已软删的行当成「没有行」
+ *   → 去 create 新行 → 撞唯一约束（500）。删除好友后就再也加不回来。
+ * - 但若两方向各有一行（一行已删、一行活着），优先用**活着**的那行。
+ * - **翻转方向**（把旧行改成「我 → 对方」）前，必须**物理删除**反向的重复行：
+ *   若把反向行也翻转成 (我, 对方)，就会与保留行撞 `uk_friendship(我, 对方)`（P2002）。
  */
 
 import { PrismaService } from '../prisma/prisma.service';
@@ -39,6 +58,47 @@ export const FRIENDSHIP_STATUS = {
 
 export type FriendshipStatus =
   (typeof FRIENDSHIP_STATUS)[keyof typeof FRIENDSHIP_STATUS];
+
+/** friendship 一行的关键字段 */
+export interface FriendshipRow {
+  id: bigint;
+  requesterId: bigint;
+  addresseeId: bigint;
+  status: string;
+  deleted: number;
+}
+
+/**
+ * 列出两人之间的**全部**关系行（双向，含软删行）。
+ *
+ * 用于「收敛重复行」：历史数据或方向翻转可能留下两行，
+ * 同一对用户最终只应保留一行（见文件头不变式）。
+ *
+ * **不按 `deleted` 过滤**——软删行仍然占着唯一键 `uk_friendship`，
+ * 忽略它会导致「删除好友后重新加」时 create 撞约束。
+ */
+export async function listFriendshipsBetween(
+  prisma: PrismaService,
+  userA: bigint,
+  userB: bigint,
+): Promise<FriendshipRow[]> {
+  return prisma.friendship.findMany({
+    where: {
+      OR: [
+        { requesterId: userA, addresseeId: userB },
+        { requesterId: userB, addresseeId: userA },
+      ],
+    },
+    select: {
+      id: true,
+      requesterId: true,
+      addresseeId: true,
+      status: true,
+      deleted: true,
+    },
+    orderBy: { id: 'asc' },
+  });
+}
 
 /** 判定双方是否已互为好友（accepted 且双向任一方向命中） */
 export async function areFriends(
@@ -58,29 +118,6 @@ export async function areFriends(
     select: { id: true },
   });
   return row !== null;
-}
-
-/**
- * 查询两人之间「我 → 对方」方向的那条关系（申请方是我）。
- *
- * **注意：不按 `deleted` 过滤**——这是「删除好友后能否重新加」的关键。
- * `uk_friendship(requester_id, addressee_id)` 是唯一键，逻辑删除只是把 `deleted` 置 1，
- * **行还在、键还占着**。若查找时按 `deleted: 0` 过滤，删除过的好友会被当成「没有行」，
- * 服务层去 create 新行就撞唯一约束（500）。故这里必须把已软删的行也找出来，
- * 由调用方决定「复用改状态」还是「复活」。
- *
- * 返回值带 `deleted`，调用方据此判断这是活行还是已删行。
- */
-export async function findOutgoingFriendship(
-  prisma: PrismaService,
-  requesterId: bigint,
-  addresseeId: bigint,
-): Promise<{ id: bigint; status: string; deleted: number } | null> {
-  const row = await prisma.friendship.findFirst({
-    where: { requesterId, addresseeId },
-    select: { id: true, status: true, deleted: true },
-  });
-  return row ? { id: row.id, status: row.status, deleted: row.deleted } : null;
 }
 
 /**

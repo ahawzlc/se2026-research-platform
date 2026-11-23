@@ -5,9 +5,9 @@ import { formatDateTime, toIdString } from '../common/datetime';
 import { parseId } from '../common/team-access';
 import {
   areFriends,
-  findOutgoingFriendship,
   FRIENDSHIP_STATUS,
   listFriendIds,
+  listFriendshipsBetween,
   listIncomingRequests,
 } from '../common/friendship-access';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -104,14 +104,32 @@ export class FriendsService {
   /**
    * 发起好友申请（按 UID）。
    *
-   * 状态流转：
+   * ## 一对用户只允许存在一行（关键不变式）
+   *
+   * `uk_friendship (requester_id, addressee_id)` 是**有方向**的唯一键，
+   * 所以 A→B 与 B→A 是两个不同的键。若不加约束地 create，
+   * 「A 申请 B、B 也申请 A」会落两行，之后双方好友列表会打架、
+   * 删除一方后另一行还活着。所以本方法**双向查一次**：
+   *
+   * ```
+   * existing = listFriendshipsBetween(me, peer)   // (A,B) 与 (B,A) 都查
+   * ```
+   *
+   * 命中 → 复用那一行（复活 / 改方向 / 改状态）；未命中 → 才 create。
+   *
+   * ## 状态流转
+   *
    *   - 已是好友 → 409；
-   *   - 对方已申请我（存在反向 pending）→ 409，并提示可直接去同意；
-   *   - 我之前申请过且被拒（rejected）→ 复用该行改回 pending（可再次申请）；
-   *   - 我之前申请过且还在 pending → 409（同一行不可重复申请）；
-   *   - 我之前删除过这位好友（行还在，只是 deleted=1）→ **复活该行**改回 pending，
-   *     不能 create 新行——`uk_friendship` 唯一键不区分 deleted，新行必撞约束；
+   *   - 存在反向 pending（对方已申请我）→ 409，提示去「好友申请」处理；
+   *   - 我发起的 pending → 409（同一行不可重复申请）；
+   *   - rejected（被拒）→ 复用该行改回 pending；
+   *   - deleted=1（我删过这位好友）→ **复活该行**改回 pending。
+   *     不能 create 新行：`uk_friendship` 不区分 deleted，新行必撞约束（500）。
    *   - 全新 → 新建 pending 行。
+   *
+   * 注意「再次申请」时该行的**方向会改为新的发起方**
+   * （requester=我、addressee=对方），这样接收方的「待处理申请」列表
+   * 才能用 `addresseeId = 我` 查到，同意/拒绝也才有意义。
    */
   async createRequest(
     userId: string,
@@ -135,43 +153,61 @@ export class FriendsService {
       throw BizException.conflict('你们已经是好友了');
     }
 
+    // 双向查一次：确保「一对用户至多一行」
+    // （`uk_friendship` 是有方向的唯一键，(A,B) 与 (B,A) 是两个不同的键）
+    const allRows = await listFriendshipsBetween(this.prisma, me, peer.id);
+    const alive = allRows.filter((r) => r.deleted === 0);
+    const mine = alive.find(
+      (r) => r.requesterId === me && r.addresseeId === peer.id,
+    );
+    const theirs = alive.find(
+      (r) => r.requesterId === peer.id && r.addresseeId === me,
+    );
+
     // 反向 pending：对方已经申请过我 → 提示去处理，不要再插一行
-    // 注意同样不按 deleted 过滤：删过好友后行还在、键还占着
-    const reverse = await this.prisma.friendship.findFirst({
-      where: {
-        requesterId: peer.id,
-        addresseeId: me,
-        deleted: 0,
-      },
-      select: { id: true, status: true },
-    });
-    if (reverse && reverse.status === FRIENDSHIP_STATUS.PENDING) {
+    if (theirs && theirs.status === FRIENDSHIP_STATUS.PENDING) {
       throw BizException.conflict(
         '对方已向你发起好友申请，请去「好友申请」处理',
       );
     }
 
-    // 我发起的方向：可能已存在（pending 待处理 / rejected 被拒可复用 / deleted 已删可复活）
-    const outgoing = await findOutgoingFriendship(this.prisma, me, peer.id);
+    // 我发起的 pending → 409（同一行不可重复申请）
+    if (mine && mine.status === FRIENDSHIP_STATUS.PENDING) {
+      throw BizException.conflict('好友申请已发出，等待对方处理');
+    }
+
     let requestId: bigint;
-    if (outgoing) {
-      if (
-        outgoing.deleted === 0 &&
-        outgoing.status === FRIENDSHIP_STATUS.PENDING
-      ) {
-        throw BizException.conflict('好友申请已发出，等待对方处理');
-      }
-      // rejected 或 deleted → 复用同一行改回 pending
-      // （唯一键 uk_friendship 不区分 deleted，create 新行会撞约束，故只能复用）
-      await this.prisma.friendship.update({
-        where: { id: outgoing.id },
-        data: {
-          status: FRIENDSHIP_STATUS.PENDING,
-          handledAt: null,
-          deleted: 0,
-        },
-      });
-      requestId = outgoing.id;
+    if (allRows.length > 0) {
+      // 已有关系行 → 复用（唯一键 uk_friendship 不区分 deleted，
+      // create 新行必撞约束，故只能复用旧行）
+      //
+      // 优先保留「活着且是我发起方向」的行；否则取任意活行；
+      // 全是软删行则取第一条（旧行复活）。
+      const keep = mine ?? theirs ?? alive[0] ?? allRows[0];
+      const extras = allRows.filter((r) => r.id !== keep.id);
+
+      // 翻转方向前必须先物理删除反向的重复行：
+      // 若反向行还在，把它翻转成 (me,peer) 会撞唯一约束（P2002）。
+      await this.prisma.$transaction([
+        ...(extras.length > 0
+          ? [
+              this.prisma.friendship.deleteMany({
+                where: { id: { in: extras.map((r) => r.id) } },
+              }),
+            ]
+          : []),
+        this.prisma.friendship.update({
+          where: { id: keep.id },
+          data: {
+            requesterId: me,
+            addresseeId: peer.id,
+            status: FRIENDSHIP_STATUS.PENDING,
+            handledAt: null,
+            deleted: 0,
+          },
+        }),
+      ]);
+      requestId = keep.id;
     } else {
       const created = await this.prisma.friendship.create({
         data: {
@@ -370,6 +406,10 @@ export class FriendsService {
    * 双方同时不可见：把两人之间所有关系行（含 pending / rejected）一并置 deleted=1。
    * 保留行而不是物理删除，是为了不破坏"同一对用户至多一行"的不变式——
    * 物理删除后再次申请会插新行，与历史行并存易产生脏数据。
+   *
+   * 若历史脏数据导致两人之间有两行，则**物理删除多余的那行**：
+   * 唯一键不区分 deleted，多余的软删行仍占着键，
+   * 后续「重新加好友并翻转方向」会撞 P2002。
    */
   async removeFriend(userId: string, friendIdParam: string): Promise<void> {
     const friendId = parseId(friendIdParam);

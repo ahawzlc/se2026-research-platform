@@ -345,8 +345,77 @@ maybe('个人主页与好友链真库集成（线③ 卡 E-3）', () => {
       .expect(201);
   });
 
-  // ---------------------------------------------------------------- 可见范围
+  /**
+   * 回归（真库唯一才暴露）：`uk_friendship(requester_id, addressee_id)` **有方向**，
+   * 所以 A→B 与 B→A 是两个不同的键。若服务层只按自己方向查找，
+   * 「A 申请过 B、B 再申请 A」会插第二行，产生「一对用户两行」的脏数据，
+   * 之后双方好友列表会打架、删除一方后另一行还活着。
+   *
+   * 不变式：**任意时刻，一对用户之间至多存在一行 friendship**。
+   */
+  it('一对用户至多一行：双方互发申请不会插第二行', async () => {
+    const aliceUid = await uidOf(alice.token);
 
+    // 前面的用例已留下 Alice ↔ Bob 的一行（软删）。
+    // 把它改成 rejected（双方都还能再申请），而不是 create 新行——
+    // create 会撞 uk_friendship。
+    const existing = await prisma.friendship.findFirst({
+      where: {
+        OR: [
+          {
+            requesterId: BigInt(alice.userId),
+            addresseeId: BigInt(bob.userId),
+          },
+          {
+            requesterId: BigInt(bob.userId),
+            addresseeId: BigInt(alice.userId),
+          },
+        ],
+      },
+    });
+    expect(existing).toBeDefined();
+    await prisma.friendship.update({
+      where: { id: existing!.id },
+      data: { status: 'rejected', deleted: 0, handledAt: new Date() },
+    });
+
+    // Bob 反向申请 Alice → 应复用旧行并翻转方向，不新增行
+    const res = await request(app.getHttpServer())
+      .post('/api/v1/friends/requests')
+      .set('Authorization', `Bearer ${bob.token}`)
+      .send({ uid: aliceUid })
+      .expect(201);
+    const requestId = envelope<FriendBody>(res).data?.requestId ?? '';
+
+    // 真库校验：仍然只有一行，且方向已翻转为 Bob → Alice
+    const rows = await prisma.friendship.findMany({
+      where: {
+        OR: [
+          {
+            requesterId: BigInt(alice.userId),
+            addresseeId: BigInt(bob.userId),
+          },
+          {
+            requesterId: BigInt(bob.userId),
+            addresseeId: BigInt(alice.userId),
+          },
+        ],
+      },
+    });
+    expect(rows.length).toBe(1);
+    expect(rows[0].id.toString()).toBe(requestId);
+    expect(rows[0].requesterId.toString()).toBe(bob.userId);
+    expect(rows[0].addresseeId.toString()).toBe(alice.userId);
+    expect(rows[0].status).toBe('pending');
+
+    // 收尾：拒绝掉，恢复「非好友」状态供后续用例
+    await request(app.getHttpServer())
+      .post(`/api/v1/friends/requests/${requestId}/reject`)
+      .set('Authorization', `Bearer ${alice.token}`)
+      .expect(201);
+  });
+
+  // ---------------------------------------------------------------- 可见范围
   it('可见范围 private：他人看不到主页（403）', async () => {
     await request(app.getHttpServer())
       .put('/api/v1/users/me')
