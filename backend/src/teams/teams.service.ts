@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import type { Team, TeamMember } from '@prisma/client';
+import type { Prisma, Team, TeamMember } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BizException, ErrorCode } from '../common/result';
 import { formatDateTime, toIdString } from '../common/datetime';
@@ -60,25 +60,42 @@ export class TeamsService {
 
   /** 建组：team 与组长记录同一事务写入，任一失败整体回滚 */
   async createTeam(userId: string, dto: CreateTeamDto): Promise<CreatedTeam> {
-    const ownerId = BigInt(userId);
+    const team = await this.prisma.$transaction((tx) =>
+      this.createTeamInTransaction(tx, BigInt(userId), {
+        name: dto.name,
+        description: dto.description ?? '',
+      }),
+    );
+    return this.toCreatedTeam(team);
+  }
+
+  /**
+   * 在调用方事务内建组（卡 E-2 审批通过后「自动建组」复用，避免重复一套建组逻辑）。
+   *
+   * team 与组长记录写入调用方的事务：调用方后续步骤失败时一并回滚。
+   * 邀请码撞唯一索引时换码重试；MySQL 下单条语句失败不会中止事务，可以原地重试。
+   * 返回值里的邀请码只在此处给出一次，调用方需转交给组长。
+   */
+  async createTeamInTransaction(
+    tx: Prisma.TransactionClient,
+    ownerId: bigint,
+    input: { name: string; description?: string },
+  ): Promise<Team> {
     for (let attempt = 1; attempt <= INVITE_MAX_RETRY; attempt++) {
       const inviteCode = this.generateInviteCode();
       try {
-        const team = await this.prisma.$transaction(async (tx) => {
-          const created = await tx.team.create({
-            data: {
-              name: dto.name,
-              description: dto.description ?? '',
-              ownerId,
-              inviteCode,
-            },
-          });
-          await tx.teamMember.create({
-            data: { teamId: created.id, userId: ownerId, role: 'owner' },
-          });
-          return created;
+        const created = await tx.team.create({
+          data: {
+            name: input.name,
+            description: input.description ?? '',
+            ownerId,
+            inviteCode,
+          },
         });
-        return this.toCreatedTeam(team);
+        await tx.teamMember.create({
+          data: { teamId: created.id, userId: ownerId, role: 'owner' },
+        });
+        return created;
       } catch (error) {
         if (!isUniqueViolation(error)) {
           throw error;
@@ -87,6 +104,32 @@ export class TeamsService {
       }
     }
     throw new BizException(ErrorCode.INTERNAL, '邀请码生成失败，请重试');
+  }
+
+  /**
+   * 确保用户是该组的有效成员（卡 E-2 审批通过后「自动入组」用），须在业务事务内调用。
+   *
+   * 与 join 的区别：已是成员时不报错（申请人可能已凭邀请码先入组）；
+   * 曾退出（软删）的成员恢复原行——uk_team_member(team_id, user_id) 不过滤软删行，不能新增。
+   */
+  async ensureMemberInTransaction(
+    tx: Prisma.TransactionClient,
+    teamId: bigint,
+    userId: bigint,
+  ): Promise<void> {
+    const existing = await tx.teamMember.findFirst({
+      where: { teamId, userId },
+    });
+    if (!existing) {
+      await tx.teamMember.create({
+        data: { teamId, userId, role: 'member' },
+      });
+    } else if (existing.deleted === 1) {
+      await tx.teamMember.update({
+        where: { id: existing.id },
+        data: { deleted: 0, role: 'member' },
+      });
+    }
   }
 
   /** 凭邀请码入组；曾退出（软删）的成员恢复身份而不是新增行 */
