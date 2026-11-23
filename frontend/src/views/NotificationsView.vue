@@ -36,7 +36,11 @@ async function load() {
 
 function refTarget(item: NotificationItem): string {
   // 已知来源跳对应页面；friendship 待线③页面落地后接入
-  if (item.refType === 'community_post') return `/community/${item.refId}`
+  if (item.refType === 'community_post') {
+    // 「有人申请加入」直达该帖的申请管理页签，其余社区通知进详情
+    const tab = item.type === 'team_apply' ? '?tab=applications' : ''
+    return `/community/${item.refId}${tab}`
+  }
   if (item.refType === 'meeting') return '/meetings'
   if (item.refType === 'conversation') return '/messages'
   return ''
