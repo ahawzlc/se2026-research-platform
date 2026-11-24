@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { meetingsApi, projectsApi, teamsApi } from '@/api'
@@ -7,6 +8,8 @@ import type { MeetingItem } from '@/api/meetings'
 import type { ProjectItem } from '@/api/projects'
 import type { TeamMemberItem } from '@/api/teams'
 
+const route = useRoute()
+const router = useRouter()
 const projects = ref<ProjectItem[]>([])
 const currentProjectId = ref('')
 const meetings = ref<MeetingItem[]>([])
@@ -23,7 +26,11 @@ const currentProject = computed(() =>
 
 const filteredMeetings = computed(() => {
   if (activeTab.value === 'all') return meetings.value
-  return meetings.value.filter((item) => item.status === activeTab.value)
+  const filtered = meetings.value.filter((item) => item.status === activeTab.value)
+  // 在分页前排序，让最近的一场会议始终出现在第一页。
+  return activeTab.value === 'upcoming'
+    ? filtered.sort((a, b) => a.heldAt.localeCompare(b.heldAt))
+    : filtered
 })
 
 const pagedMeetings = computed(() => {
@@ -264,11 +271,15 @@ async function handleSubmit(): Promise<void> {
 }
 
 async function removeMeeting(row: MeetingItem): Promise<void> {
-  const confirmed = await ElMessageBox.confirm(`确定删除会议“${row.title}”吗？`, '删除会议', {
-    type: 'warning',
-    confirmButtonText: '删除',
-    cancelButtonText: '取消'
-  }).catch(() => false)
+  const confirmed = await ElMessageBox.confirm(
+    `确定删除会议“${row.title}”吗？参会记录不会撤销。`,
+    '删除会议',
+    {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    }
+  ).catch(() => false)
 
   if (!confirmed) return
 
@@ -277,19 +288,52 @@ async function removeMeeting(row: MeetingItem): Promise<void> {
   await loadMeetings()
 }
 
-async function openDetail(row: MeetingItem): Promise<void> {
+let detailRequest = 0
+
+async function openDetail(row: Pick<MeetingItem, 'id'>): Promise<void> {
+  const request = ++detailRequest
+  detail.value = null
   detailVisible.value = true
   detailLoading.value = true
 
   try {
-    detail.value = await meetingsApi.fetchMeeting(row.id)
+    const result = await meetingsApi.fetchMeeting(row.id)
+    if (request === detailRequest) detail.value = result
+  } catch {
+    // 请求拦截器已提示 403/404 等错误；不要留下空详情或上一次会议的内容。
+    if (request === detailRequest) detailVisible.value = false
   } finally {
-    detailLoading.value = false
+    if (request === detailRequest) detailLoading.value = false
   }
 }
 
-onMounted(() => {
-  void loadProjects()
+async function openMeetingFromQuery(): Promise<void> {
+  const meetingId = route.query.meetingId
+  if (typeof meetingId !== 'string' || !meetingId) return
+
+  const row = meetings.value.find((item) => item.id === meetingId)
+  // 通知可能指向其他项目，不能只在当前项目列表中查找。
+  await openDetail(row ?? { id: meetingId })
+}
+
+function handleDetailClosed(): void {
+  if (detailVisible.value || route.query.meetingId === undefined) return
+  // 消费完深链接后清理参数，同一条提醒再次点击也能触发路由变化。
+  const query = { ...route.query }
+  delete query.meetingId
+  void router.replace({ query })
+}
+
+watch(
+  () => route.query.meetingId,
+  () => {
+    void openMeetingFromQuery()
+  }
+)
+
+onMounted(async () => {
+  await loadProjects()
+  await openMeetingFromQuery()
 })
 </script>
 
@@ -435,6 +479,10 @@ onMounted(() => {
       width="560px"
     >
       <el-form ref="formRef" :model="form" :rules="rules" label-width="90px">
+        <el-form-item label="所属项目">
+          <span>{{ currentProject?.name }}</span>
+        </el-form-item>
+
         <el-form-item label="主题" prop="title">
           <el-input v-model="form.title" maxlength="200" />
         </el-form-item>
@@ -475,53 +523,55 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="detailVisible" title="会议详情" width="680px">
-      <div v-if="detail" v-loading="detailLoading" class="meeting-detail">
-        <el-descriptions :column="2" border>
-          <el-descriptions-item label="主题" :span="2">
-            {{ detail.title }}
-          </el-descriptions-item>
+    <el-dialog v-model="detailVisible" title="会议详情" width="680px" @closed="handleDetailClosed">
+      <div v-loading="detailLoading" class="meeting-detail">
+        <template v-if="detail">
+          <el-descriptions :column="2" border>
+            <el-descriptions-item label="主题" :span="2">
+              {{ detail.title }}
+            </el-descriptions-item>
 
-          <el-descriptions-item label="所属项目">
-            {{ detail.projectName }}
-          </el-descriptions-item>
+            <el-descriptions-item label="所属项目">
+              {{ detail.projectName }}
+            </el-descriptions-item>
 
-          <el-descriptions-item label="开始时间">
-            {{ detail.heldAt || '未安排' }}
-          </el-descriptions-item>
+            <el-descriptions-item label="开始时间">
+              {{ detail.heldAt || '未安排' }}
+            </el-descriptions-item>
 
-          <el-descriptions-item label="状态">
-            <el-tag :type="statusTag(detail.status)">
-              {{ statusLabel(detail.status) }}
-            </el-tag>
-          </el-descriptions-item>
+            <el-descriptions-item label="状态">
+              <el-tag :type="statusTag(detail.status)">
+                {{ statusLabel(detail.status) }}
+              </el-tag>
+            </el-descriptions-item>
 
-          <el-descriptions-item label="地点/链接" :span="2">
-            {{ detail.location || '—' }}
-          </el-descriptions-item>
+            <el-descriptions-item label="地点/链接" :span="2">
+              {{ detail.location || '—' }}
+            </el-descriptions-item>
 
-          <el-descriptions-item label="创建时间" :span="2">
-            {{ detail.createdAt }}
-          </el-descriptions-item>
+            <el-descriptions-item label="创建时间" :span="2">
+              {{ detail.createdAt }}
+            </el-descriptions-item>
 
-          <el-descriptions-item label="会议记录" :span="2">
-            <span class="content-text">{{ detail.content || '—' }}</span>
-          </el-descriptions-item>
-        </el-descriptions>
+            <el-descriptions-item label="会议记录" :span="2">
+              <span class="content-text">{{ detail.content || '—' }}</span>
+            </el-descriptions-item>
+          </el-descriptions>
 
-        <template v-if="detail.attendees.length > 0">
-          <p class="members-title">参会人（{{ detail.attendees.length }} 人）</p>
+          <template v-if="detail.attendees.length > 0">
+            <p class="members-title">参会人（{{ detail.attendees.length }} 人）</p>
 
-          <el-table :data="detail.attendees" size="small">
-            <el-table-column label="成员" min-width="160">
-              <template #default="{ row }">
-                {{ row.nickname || row.username }}
-                <span class="muted">@{{ row.username }}</span>
-              </template>
-            </el-table-column>
+            <el-table :data="detail.attendees" size="small">
+              <el-table-column label="成员" min-width="160">
+                <template #default="{ row }">
+                  {{ row.nickname || row.username }}
+                  <span class="muted">@{{ row.username }}</span>
+                </template>
+              </el-table-column>
 
-            <el-table-column prop="email" label="邮箱" min-width="200" />
-          </el-table>
+              <el-table-column prop="email" label="邮箱" min-width="200" />
+            </el-table>
+          </template>
         </template>
       </div>
     </el-dialog>
@@ -633,6 +683,7 @@ onMounted(() => {
 .meeting-detail {
   display: grid;
   gap: 14px;
+  min-height: 120px;
 }
 
 .members-title {

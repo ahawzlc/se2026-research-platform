@@ -144,6 +144,103 @@ describe('NotificationsService.push（冻结接口）', () => {
   });
 });
 
+describe('NotificationsService.pushOnce（F-2 顺序扫描去重）', () => {
+  const input: PushNotificationInput = {
+    toUserId: '1',
+    type: 'meeting_upcoming',
+    title: '会议《周会》将于 14:00 开始',
+    refType: 'meeting',
+    refId: '5',
+  };
+
+  it('无重复时走冻结的 push 写入口，字符串 id 转为 bigint', async () => {
+    const { service, prisma } = createService();
+    prisma.notification.findFirst.mockResolvedValue(null);
+    prisma.notification.create.mockResolvedValue(
+      buildNotification({ type: 'meeting_upcoming', refType: 'meeting' }),
+    );
+
+    await expect(service.pushOnce(input)).resolves.toMatchObject({
+      id: '11',
+      refId: '5',
+    });
+
+    expect(prisma.notification.findFirst).toHaveBeenCalledWith({
+      where: {
+        userId: 1n,
+        type: 'meeting_upcoming',
+        refType: 'meeting',
+        refId: 5n,
+        deleted: 0,
+      },
+      orderBy: { id: 'desc' },
+    });
+    expect(prisma.notification.create).toHaveBeenCalledTimes(1);
+    expect(prisma.notification.create).toHaveBeenCalledWith({
+      data: {
+        userId: 1n,
+        type: 'meeting_upcoming',
+        title: input.title,
+        refType: 'meeting',
+        refId: 5n,
+      },
+    });
+  });
+
+  it.each([0, 1])('已有同人同会通知（isRead=%i）不再写入', async (isRead) => {
+    const { service, prisma } = createService();
+    prisma.notification.findFirst.mockResolvedValue(
+      buildNotification({ isRead }),
+    );
+
+    await expect(service.pushOnce(input)).resolves.toBeNull();
+    expect(prisma.notification.create).not.toHaveBeenCalled();
+    expect(prisma.notification.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          userId: 1n,
+          type: 'meeting_upcoming',
+          refType: 'meeting',
+          refId: 5n,
+          deleted: 0,
+        },
+      }),
+    );
+  });
+
+  it('bigint 入参不丢精度，其他参会人与会议使用各自的去重范围', async () => {
+    const { service, prisma } = createService();
+    prisma.notification.findFirst.mockResolvedValue(null);
+    prisma.notification.create.mockResolvedValue(buildNotification());
+
+    await service.pushOnce({
+      ...input,
+      toUserId: 9007199254740993n,
+      refId: 9007199254740995n,
+    });
+
+    expect(prisma.notification.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          userId: 9007199254740993n,
+          type: 'meeting_upcoming',
+          refType: 'meeting',
+          refId: 9007199254740995n,
+          deleted: 0,
+        },
+      }),
+    );
+  });
+
+  it('数据库写入失败向上传递，不把失败当成重复', async () => {
+    const { service, prisma } = createService();
+    prisma.notification.findFirst.mockResolvedValue(null);
+    prisma.notification.create.mockRejectedValue(new Error('数据库不可用'));
+
+    await expect(service.pushOnce(input)).rejects.toThrow('数据库不可用');
+  });
+});
+
 describe('NotificationsService 列表与未读数', () => {
   it('列表按本人过滤，unreadOnly=true 时带 isRead=0，分页字段回传', async () => {
     const { service, prisma } = createService();

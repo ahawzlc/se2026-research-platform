@@ -24,6 +24,22 @@ describe('MeetingReminderService', () => {
     notifications.pushOnce.mockResolvedValue({ id: '1' });
 
     await expect(service.runOnce(now)).resolves.toBe(2);
+    expect(prisma.meeting.findMany).toHaveBeenCalledWith({
+      where: {
+        deleted: 0,
+        heldAt: {
+          gte: new Date(now.getTime() + 55 * 60_000),
+          lte: new Date(now.getTime() + 65 * 60_000),
+        },
+        project: { deleted: 0 },
+      },
+      select: {
+        id: true,
+        title: true,
+        heldAt: true,
+        attendees: { where: { deleted: 0 }, select: { userId: true } },
+      },
+    });
     expect(notifications.pushOnce).toHaveBeenCalledTimes(2);
     expect(notifications.pushOnce).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -36,5 +52,17 @@ describe('MeetingReminderService', () => {
 
     notifications.pushOnce.mockResolvedValue(null);
     await expect(service.runOnce(now)).resolves.toBe(0);
+  });
+
+  it('定时入口执行一轮扫描', async () => {
+    const service = new MeetingReminderService(
+      {} as PrismaService,
+      {} as NotificationsService,
+    );
+    const run = jest.spyOn(service, 'runOnce').mockResolvedValue(0);
+
+    await service.handleCron();
+
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });

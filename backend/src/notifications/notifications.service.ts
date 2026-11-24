@@ -86,9 +86,12 @@ export class NotificationsService {
   }
 
   /** 幂等推送：同一用户、类型、来源只保留一条未删除通知。 */
-  async pushOnce(input: PushNotificationInput): Promise<NotificationItem | null> {
+  async pushOnce(
+    input: PushNotificationInput,
+  ): Promise<NotificationItem | null> {
     const userId = this.asId(input.toUserId, 'toUserId');
-    const refId = input.refId === undefined ? undefined : this.asId(input.refId, 'refId');
+    const refId =
+      input.refId === undefined ? undefined : this.asId(input.refId, 'refId');
     const existing = await this.prisma.notification.findFirst({
       where: {
         userId,
@@ -100,7 +103,11 @@ export class NotificationsService {
       orderBy: { id: 'desc' },
     });
     if (existing) return null;
-    return this.push({ ...input, toUserId: userId, ...(refId === undefined ? {} : { refId }) });
+    return this.push({
+      ...input,
+      toUserId: userId,
+      ...(refId === undefined ? {} : { refId }),
+    });
   }
 
   /** 我的通知列表（按 id 倒序，可仅看未读） */
