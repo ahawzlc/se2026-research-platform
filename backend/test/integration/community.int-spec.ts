@@ -835,6 +835,192 @@ maybe('组队广场真库集成（线②）', () => {
     await handle(alice, loserId.id.toString(), 'reject').expect(201);
   });
 
+  it('名额充足时两笔首次通过并发到达：只建一个课题组，两人在同一组', async () => {
+    const title = `IT并发建组_${RUN}`;
+    const post = await createPost(alice, {
+      title,
+      tagIds: [tag.internet.id],
+      recruitTotal: 2,
+    });
+    const applications = await Promise.all([
+      applyAs(bob, post.id),
+      applyAs(carol, post.id),
+    ]);
+
+    // 两个审批请求同时发出：各自在事务外读到的帖子都还没绑定课题组
+    const responses = await Promise.all(
+      applications.map((row) => handle(alice, row.id, 'approve')),
+    );
+    expect(responses.map((res) => res.status)).toEqual([201, 201]);
+
+    // 真库：帖子名下只有一个课题组，帖子绑定的就是它，三人都在这一组里
+    expect(await prisma.team.count({ where: { name: title } })).toBe(1);
+    const team = await prisma.team.findFirstOrThrow({
+      where: { name: title },
+    });
+    const members = await prisma.teamMember.findMany({
+      where: { teamId: team.id, deleted: 0 },
+      select: { userId: true },
+    });
+    expect(members.map((member) => member.userId.toString()).sort()).toEqual(
+      [alice, bob, carol].map((user) => user.userId).sort(),
+    );
+    expect(
+      await prisma.communityPost.findUnique({ where: { id: BigInt(post.id) } }),
+    ).toMatchObject({ teamId: team.id, recruitedCount: 2, status: 'full' });
+
+    // 邀请码只随建组给出一次：恰好一笔审批带 inviteCode，且就是该组的邀请码
+    const codes = responses
+      .map((res) => envelope<HandleResult>(res).data?.inviteCode)
+      .filter((code): code is string => code !== undefined);
+    expect(codes).toEqual([team.inviteCode]);
+  });
+
+  it('先申请、后凭邀请码入组，再被通过：不占名额，帖子已满员也能通过', async () => {
+    const title = `IT先申请后入组_${RUN}`;
+    const post = await createPost(alice, {
+      title,
+      tagIds: [tag.software.id],
+      recruitTotal: 2,
+    });
+    const postId = BigInt(post.id);
+
+    // 首位申请人经审批入组：自动建组并给出邀请码
+    const first = await applyAs(bob, post.id);
+    const created = envelope<HandleResult>(
+      await handle(alice, first.id, 'approve').expect(201),
+    ).data!;
+    const team = created.post.team;
+    if (!team || !created.inviteCode) {
+      throw new Error('首次通过后帖子应已绑定课题组并给出邀请码');
+    }
+    const teamId = BigInt(team.id);
+
+    // Carol、Dave 在入组之前先申请（此时入口不拦），随后 Dave 凭邀请码入组
+    const [carolApplication, daveApplication] = await Promise.all([
+      applyAs(carol, post.id),
+      applyAs(dave, post.id),
+    ]);
+    await request(app.getHttpServer())
+      .post('/api/v1/teams/join')
+      .set('Authorization', `Bearer ${dave.token}`)
+      .send({ inviteCode: created.inviteCode })
+      .expect(201);
+
+    // Carol 不在组里：通过后占名额，帖子招满
+    const filled = envelope<HandleResult>(
+      await handle(alice, carolApplication.id, 'approve').expect(201),
+    ).data!;
+    expect(filled.post).toMatchObject({
+      recruitedCount: 2,
+      recruitTotal: 2,
+      status: 'full',
+    });
+
+    // Dave 已在组里：帖子虽已满员，这条存量申请照样通过，但进度与状态都不变
+    const passed = envelope<HandleResult>(
+      await handle(alice, daveApplication.id, 'approve').expect(201),
+    ).data!;
+    expect(passed.application).toMatchObject({
+      id: daveApplication.id,
+      status: 'approved',
+    });
+    expect(passed.post).toMatchObject({
+      recruitedCount: 2,
+      recruitTotal: 2,
+      status: 'full',
+      team: { id: team.id },
+    });
+    expect(passed.inviteCode).toBeUndefined();
+
+    // 真库：组内发帖人、Bob、Carol、Dave 各一行；帖子仍是 2/2「已满员」
+    expect(await prisma.teamMember.count({ where: { teamId } })).toBe(4);
+    expect(
+      await prisma.communityPost.findUnique({ where: { id: postId } }),
+    ).toMatchObject({ recruitedCount: 2, status: 'full' });
+
+    // 通知照发；发帖人的待处理数归零
+    expect((await noticesOf(dave))[0]).toMatchObject({
+      type: 'team_apply_approved',
+      refType: 'community_post',
+      refId: post.id,
+    });
+    expect(await detailOf(alice, post.id)).toMatchObject({ pendingCount: 0 });
+  });
+
+  /** 等数据库里出现锁等待（最多 3 秒），让并发时序更容易撞在一起；等不到也不影响断言 */
+  async function waitForLockWait(): Promise<void> {
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      const rows = await prisma.$queryRaw<Array<{ n: bigint }>>`
+        SELECT COUNT(*) AS n FROM performance_schema.data_lock_waits
+      `;
+      if (rows[0] && rows[0].n > 0n) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  it('审批与入组同时落到同一申请人：入组不是审批带来的，名额不重复计', async () => {
+    const title = `IT并发入组_${RUN}`;
+    const post = await createPost(alice, {
+      title,
+      tagIds: [tag.modeling.id],
+      recruitTotal: 2,
+    });
+    const postId = BigInt(post.id);
+    const first = await applyAs(bob, post.id);
+    const created = envelope<HandleResult>(
+      await handle(alice, first.id, 'approve').expect(201),
+    ).data!;
+    const team = created.post.team;
+    if (!team) throw new Error('首次通过后帖子应已绑定课题组');
+    const teamId = BigInt(team.id);
+    const application = await applyAs(carol, post.id);
+
+    // 另一笔入组已写入 Carol 的成员行、但事务尚未提交（用打开的事务把这一刻固定住）
+    let openGate = () => {};
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    let markInserted = () => {};
+    const inserted = new Promise<void>((resolve) => {
+      markInserted = resolve;
+    });
+    const joining = prisma.$transaction(async (tx) => {
+      await tx.teamMember.create({
+        data: { teamId, userId: BigInt(carol.userId), role: 'member' },
+      });
+      markInserted();
+      await gate;
+    });
+    await inserted;
+
+    // 此刻审批 Carol 的申请：事务里查不到成员行，写入时撞上那条未提交的行。
+    // supertest 的请求要等到被 await / .then 才会发出，这里先接一个 then 把它发出去
+    const approving = handle(alice, application.id, 'approve').then(
+      (res) => res,
+    );
+    await waitForLockWait();
+    openGate();
+    const [response] = await Promise.all([approving, joining]);
+    expect(response.status).toBe(201);
+
+    // Carol 入组不是这次审批带来的：进度不 +1，组内也只有一行 Carol
+    expect(envelope<HandleResult>(response).data?.post).toMatchObject({
+      recruitedCount: 1,
+      recruitTotal: 2,
+      status: 'recruiting',
+    });
+    expect(
+      await prisma.teamMember.count({
+        where: { teamId, userId: BigInt(carol.userId) },
+      }),
+    ).toBe(1);
+    expect(
+      await prisma.communityPost.findUnique({ where: { id: postId } }),
+    ).toMatchObject({ recruitedCount: 1, status: 'recruiting' });
+  });
+
   it('拒绝后不能再次申请同一帖：状态校验与唯一键双保险', async () => {
     const title = `IT拒绝_${RUN}`;
     const post = await createPost(alice, {

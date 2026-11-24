@@ -43,6 +43,16 @@ export interface HandleResult {
 /** 审批结果：通过 / 拒绝 */
 type Decision = Extract<ApplicationStatus, 'approved' | 'rejected'>;
 
+/** 审批事务里持锁回读到的帖子行（只取审批要用的列，列名在 SQL 里已转成驼峰） */
+interface LockedPost {
+  id: bigint;
+  /** 已绑定的课题组；尚未有人通过时为 null */
+  teamId: bigint | null;
+  recruitedCount: number;
+  recruitTotal: number;
+  status: string;
+}
+
 /** 审批通过后自动创建的课题组简介 */
 const AUTO_TEAM_DESCRIPTION = '由组队广场招募帖自动创建';
 
@@ -75,8 +85,9 @@ type ApplicationWithApplicant = Prisma.TeamApplicationGetPayload<{
  *
  * 约定：
  *   - 状态机 pending → approved / rejected，不可逆；非法流转一律 409；
- *   - 通过是原子的：申请占位、名额 +1、建组、入组、转「已满员」、通知在同一事务，
+ *   - 通过是原子的：申请占位、锁定帖子、建组、入组、名额 +1、转「已满员」、通知在同一事务，
  *     任一步失败整体回滚；名额用「条件更新」扣减，并发审批不会超招；
+ *     只有本次审批真的给课题组新增了成员才占名额（申请人提前凭邀请码入组的不计）；
  *   - 审批权限在 service 层按「发帖人本人」判断（不信 JWT roles）；
  *   - 申请与审批不写埋点：发生在课题组之外，无法归属到团队（docs/01）。
  */
@@ -212,6 +223,7 @@ export class CommunityApplicationsService {
    *
    * 权限与状态先在事务外校验一次，给出明确的错误码；事务内再用「条件更新」
    * 做原子占位——两个请求并发审批同一条申请时，只有一次能把它从 pending 改走。
+   * 通过时帖子行先锁定再回读：名额、状态、课题组绑定都以持锁后的已提交数据为准。
    */
   private async handle(
     operatorId: string,
@@ -227,9 +239,8 @@ export class CommunityApplicationsService {
     if (application.status !== 'pending') {
       throw BizException.conflict('该申请已处理');
     }
-    if (decision === 'approved' && post.status === 'full') {
-      throw BizException.conflict('帖子已满员，无法再通过申请');
-    }
+    // 「帖子已满员」不在这里拦：申请人若已在该帖的课题组里，满员后这条存量申请仍应能通过，
+    // 是否占名额要到事务里锁住帖子、确认过成员关系之后才能判断
 
     // 通知文案的主语是发帖人的称呼（昵称，为空时回退到登录名）；
     // 申请人的信息随回读的申请一并带出
@@ -254,23 +265,12 @@ export class CommunityApplicationsService {
 
       let inviteCode: string | undefined;
       if (decision === 'approved') {
-        // 2) 名额：条件更新，仅当 recruited_count < recruit_total 才 +1。
-        //    已停止的帖子仍可消化存量申请（名额内），已满员的上面已拦下。
-        const taken = await tx.communityPost.updateMany({
-          where: {
-            id: post.id,
-            deleted: 0,
-            status: { in: ['recruiting', 'closed'] },
-            recruitedCount: { lt: post.recruitTotal },
-          },
-          data: { recruitedCount: { increment: 1 } },
-        });
-        if (taken.count === 0) {
-          throw BizException.conflict('帖子已满员，无法再通过申请');
-        }
+        // 2) 锁定帖子行并回读：同一帖子的并发审批从这里排队，
+        //    读到的名额、状态、课题组绑定一定是一笔审批提交之后的值
+        const locked = await this.lockPost(tx, post.id);
 
-        // 3) 首次通过：自动建组（名称 = 帖子标题，发帖人为组长）并绑定；之后复用同一课题组
-        let teamId = post.teamId;
+        // 3) 课题组：帖子尚未绑定则自动创建（名称 = 帖子标题，发帖人为组长）并绑定；之后复用同一课题组
+        let teamId = locked.teamId;
         if (teamId === null) {
           const created = await this.teams.createTeamInTransaction(
             tx,
@@ -285,28 +285,45 @@ export class CommunityApplicationsService {
           // 邀请码只随创建给出一次，交还给组长用于线下拉人
           inviteCode = created.inviteCode;
         }
-        await this.teams.ensureMemberInTransaction(
-          tx,
-          teamId,
-          application.userId,
-        );
 
-        // 4) 招满转「已满员」；已停止的帖子保持已停止
-        const afterIncrement = await tx.communityPost.findFirstOrThrow({
-          where: { id: post.id },
-        });
+        // 4) 申请人入组。只有「本次审批真的新增了一名成员」才占名额：
+        //    先申请、等待期间已凭邀请码入组的，通过时帖子不变（帖子已满员也照常通过）
         if (
-          afterIncrement.recruitedCount >= afterIncrement.recruitTotal &&
-          afterIncrement.status === 'recruiting'
+          await this.teams.ensureMemberInTransaction(
+            tx,
+            teamId,
+            application.userId,
+          )
         ) {
-          await tx.communityPost.update({
-            where: { id: post.id },
-            data: { status: 'full' },
+          // 5) 名额：条件更新，仅当 recruited_count < recruit_total 才 +1。
+          //    已停止的帖子仍可消化存量申请（名额内），已满员的在这里被拦下
+          const taken = await tx.communityPost.updateMany({
+            where: {
+              id: post.id,
+              deleted: 0,
+              status: { in: ['recruiting', 'closed'] },
+              recruitedCount: { lt: locked.recruitTotal },
+            },
+            data: { recruitedCount: { increment: 1 } },
           });
+          if (taken.count === 0) {
+            throw BizException.conflict('帖子已满员，无法再通过申请');
+          }
+
+          // 6) 招满转「已满员」；已停止的帖子保持已停止
+          if (
+            locked.recruitedCount + 1 >= locked.recruitTotal &&
+            locked.status === 'recruiting'
+          ) {
+            await tx.communityPost.update({
+              where: { id: post.id },
+              data: { status: 'full' },
+            });
+          }
         }
       }
 
-      // 5) 通知申请人，与业务写入同成同败
+      // 7) 通知申请人，与业务写入同成同败
       await this.notifications.pushInTransaction(tx, {
         toUserId: application.userId,
         type:
@@ -321,7 +338,7 @@ export class CommunityApplicationsService {
         refId: post.id,
       });
 
-      // 6) 回读处理后的申请与帖子，组装响应
+      // 8) 回读处理后的申请与帖子，组装响应
       const handled = await tx.teamApplication.findFirstOrThrow({
         where: { id: application.id },
         include: APPLICANT_INCLUDE,
@@ -346,6 +363,34 @@ export class CommunityApplicationsService {
         ...(inviteCode !== undefined ? { inviteCode } : {}),
       };
     });
+  }
+
+  /**
+   * 事务内锁定并回读帖子行（`SELECT … FOR UPDATE`）。
+   *
+   * Prisma 的模型查询带不了 `FOR UPDATE`，这里用原生 SQL。不能用事务外的快照：
+   * 「帖子是否已绑定课题组」必须是持锁之后的已提交值，否则两笔首次通过并发时会各建一个课题组。
+   * 锁在事务开始后才申请，之后事务里没有早于加锁的普通读，不存在读到旧快照的问题。
+   */
+  private async lockPost(
+    tx: Prisma.TransactionClient,
+    id: bigint,
+  ): Promise<LockedPost> {
+    const [row] = await tx.$queryRaw<LockedPost[]>`
+      SELECT id,
+             team_id AS teamId,
+             recruited_count AS recruitedCount,
+             recruit_total AS recruitTotal,
+             status
+      FROM community_post
+      WHERE id = ${id} AND deleted = 0
+      FOR UPDATE
+    `;
+    // 进事务前已校验过帖子可见，帖子又只有逻辑删除：这里只是类型收窄的兜底
+    if (!row) {
+      throw BizException.notFound('帖子不存在');
+    }
+    return row;
   }
 
   /** 路径 id 统一校验：申请不存在、已删除、id 非法一律 404 */

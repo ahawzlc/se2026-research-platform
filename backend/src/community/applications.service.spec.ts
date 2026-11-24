@@ -64,6 +64,20 @@ function currentPost(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** 审批事务里持锁回读到的帖子行：已绑定课题组 7、已招 0 人、招募中 */
+function lockedPost(overrides: Record<string, unknown> = {}) {
+  return [
+    {
+      id: 5n,
+      teamId: 7n,
+      recruitedCount: 0,
+      recruitTotal: 2,
+      status: 'recruiting',
+      ...overrides,
+    },
+  ];
+}
+
 /** 事务内「占位 / 条件更新」的调用参数；给替身标上签名，断言时才能读到类型化的实参 */
 interface UpdateManyArgs {
   where: Record<string, unknown>;
@@ -78,6 +92,8 @@ const updateMany = () =>
 
 function createService() {
   const tx = {
+    // 事务内锁定并回读帖子行（SELECT … FOR UPDATE）
+    $queryRaw: jest.fn<Promise<Array<Record<string, unknown>>>, unknown[]>(),
     teamApplication: {
       create: jest.fn(),
       updateMany: updateMany(),
@@ -140,8 +156,10 @@ function setupHandle(
   );
   ctx.prisma.communityPost.findFirst.mockResolvedValue(buildPost(options.post));
   ctx.prisma.user.findFirstOrThrow.mockResolvedValue(operator);
-  // 事务内：占位成功、名额 +1、回读已处理申请与带课题组的帖子
+  // 事务内：占位成功、持锁回读（默认：帖子已绑定课题组 7）、申请人入组（默认：是新增成员）、名额 +1
   ctx.tx.teamApplication.updateMany.mockResolvedValue({ count: 1 });
+  ctx.tx.$queryRaw.mockResolvedValue(lockedPost());
+  ctx.teams.ensureMemberInTransaction.mockResolvedValue(true);
   ctx.tx.communityPost.updateMany.mockResolvedValue({ count: 1 });
   ctx.tx.teamApplication.findFirstOrThrow.mockResolvedValue(handledRow());
   ctx.tx.communityPost.findFirstOrThrow.mockResolvedValue(currentPost());
@@ -404,21 +422,35 @@ describe('CommunityApplicationsService.approve', () => {
     expect(done.prisma.$transaction).not.toHaveBeenCalled();
   });
 
-  it('帖子已满员 → 409，不进事务', async () => {
+  it('帖子已满员、申请人不在组里 → 409：名额条件更新落空，不通知', async () => {
     const ctx = createService();
-    setupHandle(ctx, { post: { status: 'full' } });
+    setupHandle(ctx, {
+      post: { status: 'full', recruitedCount: 2, teamId: 7n },
+    });
+    ctx.tx.$queryRaw.mockResolvedValue(
+      lockedPost({ status: 'full', recruitedCount: 2 }),
+    );
+    ctx.tx.communityPost.updateMany.mockResolvedValue({ count: 0 });
 
     await expectBizError(
       ctx.service.approve('1', '31'),
       409,
       '帖子已满员，无法再通过申请',
     );
-    expect(ctx.prisma.$transaction).not.toHaveBeenCalled();
+    // 条件更新限定「招募中 / 已停止」且未达上限：已满员时一条都更新不到
+    expect(ctx.tx.communityPost.updateMany.mock.calls[0][0].where).toEqual({
+      id: 5n,
+      deleted: 0,
+      status: { in: ['recruiting', 'closed'] },
+      recruitedCount: { lt: 2 },
+    });
+    expect(ctx.notifications.pushInTransaction).not.toHaveBeenCalled();
   });
 
-  it('首次通过：占位 → 名额 +1 → 自动建组并绑定 → 申请人入组 → 通知，返回邀请码', async () => {
+  it('首次通过：占位 → 持锁回读 → 自动建组并绑定 → 申请人入组 → 名额 +1 → 通知，返回邀请码', async () => {
     const ctx = createService();
     setupHandle(ctx);
+    ctx.tx.$queryRaw.mockResolvedValue(lockedPost({ teamId: null }));
     ctx.teams.createTeamInTransaction.mockResolvedValue({
       id: 7n,
       inviteCode: 'A3BK7QXR',
@@ -431,16 +463,10 @@ describe('CommunityApplicationsService.approve', () => {
     expect(claim.where).toEqual({ id: 31n, status: 'pending', deleted: 0 });
     expect(claim.data).toMatchObject({ status: 'approved', handledBy: 1n });
     expect(claim.data.handledAt).toBeInstanceOf(Date);
-    // 2) 名额条件更新：仍有名额才 +1
-    expect(ctx.tx.communityPost.updateMany.mock.calls[0][0]).toEqual({
-      where: {
-        id: 5n,
-        deleted: 0,
-        status: { in: ['recruiting', 'closed'] },
-        recruitedCount: { lt: 2 },
-      },
-      data: { recruitedCount: { increment: 1 } },
-    });
+    // 2) 锁定帖子行并回读：原生 SQL 带 FOR UPDATE，只按帖子 id 取行
+    const [sql, ...params] = ctx.tx.$queryRaw.mock.calls[0];
+    expect(params).toEqual([5n]);
+    expect(String(sql)).toContain('FOR UPDATE');
     // 3) 自动建组：名称 = 帖子标题、发帖人为组长；随后把帖子绑定到该组
     expect(ctx.teams.createTeamInTransaction).toHaveBeenCalledWith(ctx.tx, 1n, {
       name: '互联网+项目招前端',
@@ -456,9 +482,19 @@ describe('CommunityApplicationsService.approve', () => {
       7n,
       9n,
     );
-    // 5) 未招满（1 < 2）不转「已满员」：帖子只被更新了一次（绑定课题组）
+    // 5) 名额条件更新：上限取持锁回读到的 recruitTotal
+    expect(ctx.tx.communityPost.updateMany.mock.calls[0][0]).toEqual({
+      where: {
+        id: 5n,
+        deleted: 0,
+        status: { in: ['recruiting', 'closed'] },
+        recruitedCount: { lt: 2 },
+      },
+      data: { recruitedCount: { increment: 1 } },
+    });
+    // 6) 未招满（0 + 1 < 2）不转「已满员」：帖子只被更新了一次（绑定课题组）
     expect(ctx.tx.communityPost.update).toHaveBeenCalledTimes(1);
-    // 6) 通知申请人
+    // 7) 通知申请人
     expect(ctx.notifications.pushInTransaction).toHaveBeenCalledWith(ctx.tx, {
       toUserId: 9n,
       type: 'team_apply_approved',
@@ -466,12 +502,13 @@ describe('CommunityApplicationsService.approve', () => {
       refType: 'community_post',
       refId: 5n,
     });
-    // 步骤顺序：占位 → 名额 → 建组 → 入组 → 通知，全部在同一个事务里
+    // 步骤顺序：占位 → 锁定回读 → 建组 → 入组 → 名额 → 通知，全部在同一个事务里
     const order = [
       ctx.tx.teamApplication.updateMany,
-      ctx.tx.communityPost.updateMany,
+      ctx.tx.$queryRaw,
       ctx.teams.createTeamInTransaction,
       ctx.teams.ensureMemberInTransaction,
+      ctx.tx.communityPost.updateMany,
       ctx.notifications.pushInTransaction,
     ].map((fn) => fn.mock.invocationCallOrder[0]);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
@@ -495,27 +532,43 @@ describe('CommunityApplicationsService.approve', () => {
     expect(result.inviteCode).toBe('A3BK7QXR');
   });
 
-  it('招满：进度到达招募人数后转「已满员」', async () => {
+  it('招满：持锁回读到的进度 +1 达到招募人数后转「已满员」', async () => {
     const ctx = createService();
-    setupHandle(ctx, { post: { recruitedCount: 1 } });
-    ctx.teams.createTeamInTransaction.mockResolvedValue({
-      id: 7n,
-      inviteCode: 'A3BK7QXR',
-    });
-    ctx.tx.communityPost.findFirstOrThrow
-      .mockResolvedValueOnce(currentPost({ recruitedCount: 2 }))
-      .mockResolvedValueOnce(
-        currentPost({ recruitedCount: 2, status: 'full' }),
-      );
+    setupHandle(ctx);
+    ctx.tx.$queryRaw.mockResolvedValue(lockedPost({ recruitedCount: 1 }));
+    ctx.tx.communityPost.findFirstOrThrow.mockResolvedValue(
+      currentPost({ recruitedCount: 2, status: 'full' }),
+    );
 
     const result = await ctx.service.approve('1', '31');
 
+    expect(ctx.teams.createTeamInTransaction).not.toHaveBeenCalled();
+    // 帖子只被更新了一次（转「已满员」）
+    expect(ctx.tx.communityPost.update).toHaveBeenCalledTimes(1);
     expect(ctx.tx.communityPost.update).toHaveBeenCalledWith({
       where: { id: 5n },
       data: { status: 'full' },
     });
     expect(result.post.status).toBe('full');
     expect(result.post.recruitedCount).toBe(2);
+  });
+
+  it('并发首次通过：事务外读到的帖子还没绑定课题组，持锁回读时已绑定 → 复用，不重复建组', async () => {
+    const ctx = createService();
+    // 事务外快照（setupHandle 默认）：teamId 为空；持锁回读：已绑定课题组 7
+    setupHandle(ctx);
+
+    const result = await ctx.service.approve('1', '31');
+
+    expect(ctx.teams.createTeamInTransaction).not.toHaveBeenCalled();
+    expect(ctx.tx.communityPost.update).not.toHaveBeenCalled();
+    expect(ctx.teams.ensureMemberInTransaction).toHaveBeenCalledWith(
+      ctx.tx,
+      7n,
+      9n,
+    );
+    expect(result.inviteCode).toBeUndefined();
+    expect(result.post.team).toEqual({ id: '7', name: '互联网+项目招前端' });
   });
 
   it('已有课题组：复用而不重建，响应不带邀请码', async () => {
@@ -538,27 +591,72 @@ describe('CommunityApplicationsService.approve', () => {
   it('已停止的帖子仍可通过存量申请，状态保持「已停止」', async () => {
     const ctx = createService();
     setupHandle(ctx, { post: { status: 'closed', recruitTotal: 1 } });
-    ctx.teams.createTeamInTransaction.mockResolvedValue({
-      id: 7n,
-      inviteCode: 'A3BK7QXR',
-    });
-    ctx.tx.communityPost.findFirstOrThrow
-      .mockResolvedValueOnce(
-        currentPost({ status: 'closed', recruitedCount: 1 }),
-      )
-      .mockResolvedValueOnce(
-        currentPost({
-          status: 'closed',
-          recruitedCount: 1,
-          recruitTotal: 1,
-        }),
-      );
+    ctx.tx.$queryRaw.mockResolvedValue(
+      lockedPost({ status: 'closed', recruitTotal: 1 }),
+    );
+    ctx.tx.communityPost.findFirstOrThrow.mockResolvedValue(
+      currentPost({
+        status: 'closed',
+        recruitedCount: 1,
+        recruitTotal: 1,
+      }),
+    );
 
     const result = await ctx.service.approve('1', '31');
 
-    // 名额已满但不从「已停止」改成「已满员」：帖子只被更新了一次（绑定课题组）
-    expect(ctx.tx.communityPost.update).toHaveBeenCalledTimes(1);
+    // 名额已满但不从「已停止」改成「已满员」：帖子没有被更新
+    expect(ctx.tx.communityPost.update).not.toHaveBeenCalled();
     expect(result.post.status).toBe('closed');
+  });
+
+  it('申请人已在课题组里（先申请、后凭邀请码入组）：通过并通知，但不占名额', async () => {
+    const ctx = createService();
+    setupHandle(ctx);
+    ctx.teams.ensureMemberInTransaction.mockResolvedValue(false);
+
+    const result = await ctx.service.approve('1', '31');
+
+    expect(result.application.status).toBe('approved');
+    expect(ctx.tx.communityPost.updateMany).not.toHaveBeenCalled();
+    expect(ctx.tx.communityPost.update).not.toHaveBeenCalled();
+    expect(ctx.notifications.pushInTransaction).toHaveBeenCalledWith(ctx.tx, {
+      toUserId: 9n,
+      type: 'team_apply_approved',
+      title: '爱丽丝 通过了你加入《互联网+项目招前端》的申请',
+      refType: 'community_post',
+      refId: 5n,
+    });
+  });
+
+  it('帖子已满员、但申请人已在组里：仍可通过，帖子不变', async () => {
+    const ctx = createService();
+    setupHandle(ctx, {
+      post: { status: 'full', recruitedCount: 2, teamId: 7n },
+    });
+    ctx.tx.$queryRaw.mockResolvedValue(
+      lockedPost({ status: 'full', recruitedCount: 2 }),
+    );
+    ctx.teams.ensureMemberInTransaction.mockResolvedValue(false);
+    ctx.tx.communityPost.findFirstOrThrow.mockResolvedValue(
+      currentPost({ status: 'full', recruitedCount: 2 }),
+    );
+
+    const result = await ctx.service.approve('1', '31');
+
+    expect(result.application.status).toBe('approved');
+    expect(result.post).toMatchObject({ recruitedCount: 2, status: 'full' });
+    expect(ctx.tx.communityPost.updateMany).not.toHaveBeenCalled();
+    expect(ctx.notifications.pushInTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('持锁回读不到帖子行 → 404，不入组不通知', async () => {
+    const ctx = createService();
+    setupHandle(ctx);
+    ctx.tx.$queryRaw.mockResolvedValue([]);
+
+    await expectBizError(ctx.service.approve('1', '31'), 404, '帖子不存在');
+    expect(ctx.teams.ensureMemberInTransaction).not.toHaveBeenCalled();
+    expect(ctx.notifications.pushInTransaction).not.toHaveBeenCalled();
   });
 
   it('审批通知的称呼：发帖人的昵称为空时回退到登录名（通过 / 拒绝）', async () => {
@@ -599,7 +697,7 @@ describe('CommunityApplicationsService.approve', () => {
     }
   });
 
-  it('名额被并发占满 → 409，不建组、不入组、不通知', async () => {
+  it('名额条件更新落空（被并发占满）→ 409，不通知；入组写入随事务回滚', async () => {
     const ctx = createService();
     setupHandle(ctx);
     ctx.tx.communityPost.updateMany.mockResolvedValue({ count: 0 });
@@ -610,7 +708,6 @@ describe('CommunityApplicationsService.approve', () => {
       '帖子已满员，无法再通过申请',
     );
     expect(ctx.teams.createTeamInTransaction).not.toHaveBeenCalled();
-    expect(ctx.teams.ensureMemberInTransaction).not.toHaveBeenCalled();
     expect(ctx.notifications.pushInTransaction).not.toHaveBeenCalled();
   });
 
@@ -620,6 +717,7 @@ describe('CommunityApplicationsService.approve', () => {
     ctx.tx.teamApplication.updateMany.mockResolvedValue({ count: 0 });
 
     await expectBizError(ctx.service.approve('1', '31'), 409, '该申请已处理');
+    expect(ctx.tx.$queryRaw).not.toHaveBeenCalled();
     expect(ctx.tx.communityPost.updateMany).not.toHaveBeenCalled();
     expect(ctx.teams.createTeamInTransaction).not.toHaveBeenCalled();
     expect(ctx.teams.ensureMemberInTransaction).not.toHaveBeenCalled();
