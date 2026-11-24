@@ -9,6 +9,7 @@ import type {
   PostStatus,
   TagCategory
 } from '@/api/community'
+import { displayNickname } from '@/utils/display'
 import PostFormDialog from '@/components/community/PostFormDialog.vue'
 
 /**
@@ -292,9 +293,9 @@ onMounted(() => {
           <p v-if="post.content" class="post-excerpt">{{ excerpt(post) }}</p>
           <div class="post-card-foot">
             <el-avatar :size="22" :src="post.author.avatar">
-              {{ post.author.nickname.charAt(0) }}
+              {{ displayNickname(post.author.nickname).charAt(0) }}
             </el-avatar>
-            <span class="post-author">{{ post.author.nickname }}</span>
+            <span class="post-author">{{ displayNickname(post.author.nickname) }}</span>
             <span class="post-time">{{ post.createdAt }}</span>
           </div>
         </article>

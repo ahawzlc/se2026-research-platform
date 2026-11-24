@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { communityApi } from '@/api'
 import type { ApplicationStatus, CommunityPostItem, PostStatus } from '@/api/community'
+import { displayNickname } from '@/utils/display'
 import PostFormDialog from '@/components/community/PostFormDialog.vue'
 import ApplicationsPanel from '@/components/community/ApplicationsPanel.vue'
 
@@ -259,10 +260,10 @@ onMounted(() => {
           <el-card shadow="never" class="author-card">
             <div class="author-line">
               <el-avatar :size="40" :src="post.author.avatar">
-                {{ post.author.nickname.charAt(0) }}
+                {{ displayNickname(post.author.nickname).charAt(0) }}
               </el-avatar>
               <div class="author-meta">
-                <span class="author-name">{{ post.author.nickname }}</span>
+                <span class="author-name">{{ displayNickname(post.author.nickname) }}</span>
                 <span class="author-role">发布人</span>
               </div>
             </div>
@@ -322,7 +323,7 @@ onMounted(() => {
     <el-dialog v-model="applyVisible" title="申请加入" width="480px" :close-on-click-modal="false">
       <p v-if="post" class="apply-hint">
         向
-        <b>{{ post.author.nickname }}</b>
+        <b>{{ displayNickname(post.author.nickname) }}</b>
         说明你能贡献什么，发帖人会在「申请管理」里处理。
       </p>
       <el-input

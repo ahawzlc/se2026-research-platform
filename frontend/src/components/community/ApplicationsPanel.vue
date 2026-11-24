@@ -3,6 +3,7 @@ import { onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { communityApi } from '@/api'
 import type { ApplicationItem, ApplicationStatus, CommunityPostItem } from '@/api/community'
+import { displayNickname } from '@/utils/display'
 
 /**
  * 申请管理面板（卡 E-2，线②）：发帖人在帖子详情的「申请管理」页签里处理申请。
@@ -68,7 +69,7 @@ const inviteCode = ref('')
 const teamName = ref('')
 
 async function handleApprove(row: ApplicationItem): Promise<void> {
-  const applicant = row.applicant.nickname
+  const applicant = displayNickname(row.applicant.nickname)
   const confirmed = await ElMessageBox.confirm(
     props.post.team
       ? `通过后「${applicant}」将加入课题组「${props.post.team.name}」。确定通过？`
@@ -96,7 +97,7 @@ async function handleApprove(row: ApplicationItem): Promise<void> {
 }
 
 async function handleReject(row: ApplicationItem): Promise<void> {
-  const applicant = row.applicant.nickname
+  const applicant = displayNickname(row.applicant.nickname)
   const confirmed = await ElMessageBox.confirm(
     `拒绝后「${applicant}」不能再次申请本帖，且无法撤销。确定拒绝？`,
     '拒绝申请',
@@ -152,9 +153,9 @@ onMounted(() => {
         <template #default="{ row }">
           <div class="applicant">
             <el-avatar :size="30" :src="row.applicant.avatar">
-              {{ row.applicant.nickname.charAt(0) }}
+              {{ displayNickname(row.applicant.nickname).charAt(0) }}
             </el-avatar>
-            <span class="applicant-name">{{ row.applicant.nickname }}</span>
+            <span class="applicant-name">{{ displayNickname(row.applicant.nickname) }}</span>
           </div>
         </template>
       </el-table-column>
