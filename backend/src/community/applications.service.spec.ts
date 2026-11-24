@@ -97,6 +97,7 @@ function createService() {
       findMany: jest.fn(),
     },
     communityPost: { findFirst: jest.fn() },
+    teamMember: { findFirst: jest.fn() },
     user: { findFirstOrThrow: jest.fn() },
     // 交互式事务：直接把 tx 交给回调执行
     $transaction: jest.fn(async (fn: (client: unknown) => Promise<unknown>) =>
@@ -267,6 +268,55 @@ describe('CommunityApplicationsService.apply', () => {
       expect(ctx.prisma.$transaction).not.toHaveBeenCalled();
       expect(ctx.tx.teamApplication.create).not.toHaveBeenCalled();
     }
+  });
+
+  it('已在该帖课题组的成员 → 409，不写入申请', async () => {
+    const ctx = createService();
+    ctx.prisma.communityPost.findFirst.mockResolvedValue(
+      buildPost({ teamId: 7n }),
+    );
+    ctx.prisma.teamApplication.findFirst.mockResolvedValue(null);
+    ctx.prisma.teamMember.findFirst.mockResolvedValue({ id: 101n });
+
+    await expectBizError(
+      ctx.service.apply('9', '5', {}),
+      409,
+      '你已在该课题组中，无需申请',
+    );
+    expect(ctx.prisma.teamMember.findFirst).toHaveBeenCalledWith({
+      where: { teamId: 7n, userId: 9n, deleted: 0 },
+      select: { id: true },
+    });
+    expect(ctx.prisma.$transaction).not.toHaveBeenCalled();
+    expect(ctx.tx.teamApplication.create).not.toHaveBeenCalled();
+  });
+
+  it('已有申请记录时优先按申请状态提示，不查成员', async () => {
+    const ctx = createService();
+    ctx.prisma.communityPost.findFirst.mockResolvedValue(
+      buildPost({ teamId: 7n }),
+    );
+    ctx.prisma.teamApplication.findFirst.mockResolvedValue({
+      status: 'rejected',
+    });
+
+    await expectBizError(
+      ctx.service.apply('9', '5', {}),
+      409,
+      '申请已被拒绝，不能再次申请',
+    );
+    expect(ctx.prisma.teamMember.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('帖子还没绑定课题组 → 不查成员，正常申请', async () => {
+    const ctx = createService();
+    setupApply(ctx);
+    ctx.prisma.teamMember.findFirst.mockResolvedValue({ id: 101n });
+
+    await ctx.service.apply('9', '5', {});
+
+    expect(ctx.prisma.teamMember.findFirst).not.toHaveBeenCalled();
+    expect(ctx.tx.teamApplication.create).toHaveBeenCalledTimes(1);
   });
 
   it('并发重复申请撞唯一键 → 409', async () => {

@@ -647,6 +647,65 @@ maybe('组队广场真库集成（线②）', () => {
     ).toMatchObject({ recruitedCount: 1 });
   });
 
+  it('已凭邀请码入组的人不能再申请该帖，进度不会被多计', async () => {
+    const title = `IT已入组_${RUN}`;
+    const post = await createPost(alice, {
+      title,
+      tagIds: [tag.software.id],
+      recruitTotal: 2,
+    });
+    const postId = BigInt(post.id);
+
+    // 首位申请人走审批通过：自动建组，响应给出邀请码
+    const application = await applyAs(bob, post.id, '我会前端');
+    const approved = envelope<HandleResult>(
+      await handle(alice, application.id, 'approve').expect(201),
+    ).data!;
+    const team = approved.post.team;
+    if (!team || !approved.inviteCode) {
+      throw new Error('首次通过后帖子应已绑定课题组并给出邀请码');
+    }
+    const teamId = BigInt(team.id);
+
+    // Carol 凭邀请码入组（没有经过帖子申请）
+    await request(app.getHttpServer())
+      .post('/api/v1/teams/join')
+      .set('Authorization', `Bearer ${carol.token}`)
+      .send({ inviteCode: approved.inviteCode })
+      .expect(201);
+
+    // 再去申请同一帖：409，不落申请、不发通知
+    const blocked = await api(carol.token)
+      .post(`/posts/${post.id}/apply`, { note: '我也来' })
+      .expect(409);
+    expect(envelope<null>(blocked).message).toBe('你已在该课题组中，无需申请');
+    expect(
+      await prisma.teamApplication.count({
+        where: { postId, userId: BigInt(carol.userId) },
+      }),
+    ).toBe(0);
+    const applyNotices = (await noticesOf(alice)).filter(
+      (notice) => notice.type === 'team_apply' && notice.refId === post.id,
+    );
+    expect(applyNotices).toHaveLength(1);
+
+    // 进度仍只计经审批入组的 Bob（1/2），帖子还在招募；
+    // 放行再通过的话会变成 2/2「已满员」，而组里并没有因此多一个人
+    expect(await detailOf(alice, post.id)).toMatchObject({
+      recruitedCount: 1,
+      recruitTotal: 2,
+      status: 'recruiting',
+      pendingCount: 0,
+    });
+    // Carol 确实在组里：入组方式是邀请码，不是申请
+    expect(
+      await prisma.teamMember.findFirst({
+        where: { teamId, userId: BigInt(carol.userId), deleted: 0 },
+        select: { id: true },
+      }),
+    ).not.toBeNull();
+  });
+
   it('招满自动转「已满员」，后续申请被拒之门外', async () => {
     const title = `IT满员_${RUN}`;
     const post = await createPost(alice, {

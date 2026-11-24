@@ -115,6 +115,18 @@ export class CommunityApplicationsService {
         EXISTING_APPLICATION_MESSAGES[existing.status as ApplicationStatus],
       );
     }
+    // 已在该帖绑定的课题组里（如凭邀请码先入组）→ 不必再申请。
+    // 放行的话，发帖人通过时会让 recruited_count +1，而组里并没有新增成员，
+    // 帖子会提前显示「已满员」（列口径是「每审批通过一人 +1」，故在入口拦下）。
+    if (post.teamId !== null) {
+      const member = await this.prisma.teamMember.findFirst({
+        where: { teamId: post.teamId, userId: applicantId, deleted: 0 },
+        select: { id: true },
+      });
+      if (member) {
+        throw BizException.conflict('你已在该课题组中，无需申请');
+      }
+    }
     const applicant = await this.prisma.user.findFirstOrThrow({
       where: { id: applicantId, deleted: 0 },
       select: { nickname: true, username: true },

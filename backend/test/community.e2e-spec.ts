@@ -105,6 +105,7 @@ describe('组队广场 (e2e)', () => {
       groupBy: jest.fn().mockResolvedValue([]),
     },
     user: { findFirstOrThrow: jest.fn() },
+    teamMember: { findFirst: jest.fn() },
     $transaction: jest.fn((callback: (client: typeof tx) => unknown) =>
       callback(tx),
     ),
@@ -163,6 +164,7 @@ describe('组队广场 (e2e)', () => {
     prisma.teamApplication.findFirst.mockResolvedValue(null);
     prisma.teamApplication.findMany.mockResolvedValue([]);
     prisma.teamApplication.groupBy.mockResolvedValue([]);
+    prisma.teamMember.findFirst.mockResolvedValue(null);
   });
 
   it('未登录访问广场接口返回 401 与业务错误码', async () => {
@@ -495,6 +497,23 @@ describe('组队广场 (e2e)', () => {
       const res = await authed('post', '/posts/5/apply').send({});
       expect(res.status).toBe(409);
     }
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(tx.teamApplication.create).not.toHaveBeenCalled();
+  });
+
+  it('已在该帖课题组的成员（如凭邀请码先入组）→ 409，不写入申请', async () => {
+    prisma.communityPost.findFirst.mockResolvedValue({
+      ...postRow,
+      userId: 2n,
+      teamId: 7n,
+    });
+    prisma.teamApplication.findFirst.mockResolvedValue(null);
+    prisma.teamMember.findFirst.mockResolvedValue({ id: 101n });
+
+    const res = await authed('post', '/posts/5/apply').send({});
+    expect(res.status).toBe(409);
+    expect(envelope<null>(res).message).toBe('你已在该课题组中，无需申请');
+    // 审批通过会让进度 +1，而组里并没有新增成员：在申请入口拦下
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(tx.teamApplication.create).not.toHaveBeenCalled();
   });
