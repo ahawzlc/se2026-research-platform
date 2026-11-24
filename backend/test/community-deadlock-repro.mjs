@@ -2,7 +2,7 @@
 /**
  * 「真库集成测试」间歇性 P2034 死锁的复现与对照（PR #46 评审，诊断脚本，不进 CI）。
  *
- * 成环的两方（InnoDB 死锁记录见 docs/16 第九节）：
+ * 成环的两方（InnoDB 死锁记录见 docs/18 第九节）：
  *   A. 认证链套件 afterAll 的物理清理  DELETE FROM user WHERE username LIKE 't1a_%'
  *      —— 删父行时逐张检查子表外键，在 notification 等子表的 (user_id, …) 索引末尾留下共享间隙锁；
  *      扫到「用户名排在 t1a_ 之后的第一条用户行」时还要给这一行上排他锁。
