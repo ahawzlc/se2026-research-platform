@@ -169,14 +169,9 @@ onMounted(() => {
       <el-table-column label="操作" width="200" fixed="right">
         <template #default="{ row }">
           <template v-if="row.status === 'pending'">
-            <el-button
-              link
-              type="primary"
-              :loading="busyId === row.id"
-              :disabled="post.status === 'full'"
-              :title="post.status === 'full' ? '帖子已满员，可改为拒绝' : ''"
-              @click="handleApprove(row)"
-            >
+            <!-- 帖子满员时这里不禁用：申请人若已在课题组里，后端照常通过且不占名额；
+                 不在组里的由后端返回 409「帖子已满员，无法再通过申请」 -->
+            <el-button link type="primary" :loading="busyId === row.id" @click="handleApprove(row)">
               通过
             </el-button>
             <el-button link type="danger" :disabled="busyId !== ''" @click="handleReject(row)">
