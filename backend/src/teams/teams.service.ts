@@ -111,25 +111,42 @@ export class TeamsService {
    *
    * 与 join 的区别：已是成员时不报错（申请人可能已凭邀请码先入组）；
    * 曾退出（软删）的成员恢复原行——uk_team_member(team_id, user_id) 不过滤软删行，不能新增。
+   *
+   * 返回「本次调用是否真的给课题组增加了一名有效成员」，调用方据此决定是否占用名额。
+   * 查询之后若有人并发入组（如申请人恰好同时凭邀请码入组），以唯一索引的结论为准：落败返回 false。
    */
   async ensureMemberInTransaction(
     tx: Prisma.TransactionClient,
     teamId: bigint,
     userId: bigint,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const existing = await tx.teamMember.findFirst({
       where: { teamId, userId },
+      select: { id: true, deleted: true },
     });
     if (!existing) {
-      await tx.teamMember.create({
-        data: { teamId, userId, role: 'member' },
-      });
-    } else if (existing.deleted === 1) {
-      await tx.teamMember.update({
-        where: { id: existing.id },
-        data: { deleted: 0, role: 'member' },
-      });
+      try {
+        await tx.teamMember.create({
+          data: { teamId, userId, role: 'member' },
+        });
+      } catch (error) {
+        // MySQL 下单条语句失败不中止事务：撞唯一键说明成员行已由别人写入
+        if (isUniqueViolation(error)) {
+          return false;
+        }
+        throw error;
+      }
+      return true;
     }
+    if (existing.deleted === 0) {
+      return false;
+    }
+    // 带 deleted: 1 条件：恢复的同时若被并发恢复，影响行数为 0，不算本次新增
+    const revived = await tx.teamMember.updateMany({
+      where: { id: existing.id, deleted: 1 },
+      data: { deleted: 0, role: 'member' },
+    });
+    return revived.count === 1;
   }
 
   /** 凭邀请码入组；曾退出（软删）的成员恢复身份而不是新增行 */

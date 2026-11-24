@@ -47,7 +47,11 @@ const userBrief = {
 function createService() {
   const tx = {
     team: { create: jest.fn() },
-    teamMember: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
+    teamMember: {
+      create: jest.fn(),
+      findFirst: jest.fn(),
+      updateMany: jest.fn(),
+    },
   };
   const prisma = {
     team: { findFirst: jest.fn() },
@@ -183,42 +187,82 @@ describe('TeamsService.createTeamInTransaction（卡 E-2 接缝）', () => {
 });
 
 describe('TeamsService.ensureMemberInTransaction（卡 E-2 接缝）', () => {
-  it('非成员 → 新增 member 行', async () => {
+  it('非成员 → 新增 member 行，返回 true（本次新增了成员）', async () => {
     const { service, tx } = createService();
     tx.teamMember.findFirst.mockResolvedValue(null);
 
-    await service.ensureMemberInTransaction(asTx(tx), 7n, 9n);
+    await expect(
+      service.ensureMemberInTransaction(asTx(tx), 7n, 9n),
+    ).resolves.toBe(true);
 
     expect(tx.teamMember.create).toHaveBeenCalledWith({
       data: { teamId: 7n, userId: 9n, role: 'member' },
     });
   });
 
-  it('曾退出（软删）的成员 → 恢复原行而不是新增', async () => {
+  it('查询之后被并发入组（撞唯一键）→ 不重复写入，返回 false', async () => {
+    const { service, tx } = createService();
+    tx.teamMember.findFirst.mockResolvedValue(null);
+    tx.teamMember.create.mockRejectedValue({ code: 'P2002' });
+
+    await expect(
+      service.ensureMemberInTransaction(asTx(tx), 7n, 9n),
+    ).resolves.toBe(false);
+  });
+
+  it('写入时的其他数据库错误原样抛出', async () => {
+    const { service, tx } = createService();
+    tx.teamMember.findFirst.mockResolvedValue(null);
+    tx.teamMember.create.mockRejectedValue(new Error('connection lost'));
+
+    await expect(
+      service.ensureMemberInTransaction(asTx(tx), 7n, 9n),
+    ).rejects.toThrow('connection lost');
+  });
+
+  it('曾退出（软删）的成员 → 恢复原行而不是新增，返回 true', async () => {
     const { service, tx } = createService();
     tx.teamMember.findFirst.mockResolvedValue(
       buildMember({ id: 101n, userId: 9n, deleted: 1 }),
     );
+    tx.teamMember.updateMany.mockResolvedValue({ count: 1 });
 
-    await service.ensureMemberInTransaction(asTx(tx), 7n, 9n);
+    await expect(
+      service.ensureMemberInTransaction(asTx(tx), 7n, 9n),
+    ).resolves.toBe(true);
 
-    expect(tx.teamMember.update).toHaveBeenCalledWith({
-      where: { id: 101n },
+    // 带 deleted: 1 条件：被并发恢复时不会重复写
+    expect(tx.teamMember.updateMany).toHaveBeenCalledWith({
+      where: { id: 101n, deleted: 1 },
       data: { deleted: 0, role: 'member' },
     });
     expect(tx.teamMember.create).not.toHaveBeenCalled();
   });
 
-  it('已是有效成员 → 不写入（申请人可能已凭邀请码先入组）', async () => {
+  it('恢复时发现已被并发恢复 → 返回 false（不是本次新增）', async () => {
+    const { service, tx } = createService();
+    tx.teamMember.findFirst.mockResolvedValue(
+      buildMember({ id: 101n, userId: 9n, deleted: 1 }),
+    );
+    tx.teamMember.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      service.ensureMemberInTransaction(asTx(tx), 7n, 9n),
+    ).resolves.toBe(false);
+  });
+
+  it('已是有效成员 → 不写入、返回 false（申请人可能已凭邀请码先入组）', async () => {
     const { service, tx } = createService();
     tx.teamMember.findFirst.mockResolvedValue(
       buildMember({ id: 101n, userId: 9n, role: 'member' }),
     );
 
-    await service.ensureMemberInTransaction(asTx(tx), 7n, 9n);
+    await expect(
+      service.ensureMemberInTransaction(asTx(tx), 7n, 9n),
+    ).resolves.toBe(false);
 
     expect(tx.teamMember.create).not.toHaveBeenCalled();
-    expect(tx.teamMember.update).not.toHaveBeenCalled();
+    expect(tx.teamMember.updateMany).not.toHaveBeenCalled();
   });
 });
 
