@@ -53,6 +53,14 @@ const EXISTING_APPLICATION_MESSAGES: Record<ApplicationStatus, string> = {
   rejected: '申请已被拒绝，不能再次申请',
 };
 
+/**
+ * 通知文案里对用户的称呼：昵称优先，为空时回退到登录名
+ * （与消息页私信会话标题的口径一致，避免标题里出现空白的主语）。
+ */
+function displayName(user: { nickname: string; username: string }): string {
+  return user.nickname || user.username;
+}
+
 /** 查询申请时统一带出的申请人信息（只给昵称与头像，同发布人卡片） */
 const APPLICANT_INCLUDE = {
   applicant: { select: { id: true, nickname: true, avatar: true } },
@@ -109,7 +117,7 @@ export class CommunityApplicationsService {
     }
     const applicant = await this.prisma.user.findFirstOrThrow({
       where: { id: applicantId, deleted: 0 },
-      select: { nickname: true },
+      select: { nickname: true, username: true },
     });
 
     let applicationId: bigint;
@@ -123,7 +131,7 @@ export class CommunityApplicationsService {
         await this.notifications.pushInTransaction(tx, {
           toUserId: post.userId,
           type: 'team_apply',
-          title: `${applicant.nickname} 申请加入你的帖子《${post.title}》`,
+          title: `${displayName(applicant)} 申请加入你的帖子《${post.title}》`,
           refType: 'community_post',
           refId: post.id,
         });
@@ -211,10 +219,11 @@ export class CommunityApplicationsService {
       throw BizException.conflict('帖子已满员，无法再通过申请');
     }
 
-    // 通知文案的主语是发帖人昵称；申请人的信息随回读的申请一并带出
+    // 通知文案的主语是发帖人的称呼（昵称，为空时回退到登录名）；
+    // 申请人的信息随回读的申请一并带出
     const operator = await this.prisma.user.findFirstOrThrow({
       where: { id: post.userId, deleted: 0 },
-      select: { nickname: true },
+      select: { nickname: true, username: true },
     });
 
     return this.prisma.$transaction(async (tx) => {
@@ -294,8 +303,8 @@ export class CommunityApplicationsService {
             : 'team_apply_rejected',
         title:
           decision === 'approved'
-            ? `${operator.nickname} 通过了你加入《${post.title}》的申请`
-            : `${operator.nickname} 拒绝了你加入《${post.title}》的申请`,
+            ? `${displayName(operator)} 通过了你加入《${post.title}》的申请`
+            : `${displayName(operator)} 拒绝了你加入《${post.title}》的申请`,
         refType: 'community_post',
         refId: post.id,
       });

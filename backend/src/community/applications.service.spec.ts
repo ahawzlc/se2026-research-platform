@@ -197,6 +197,29 @@ describe('CommunityApplicationsService.apply', () => {
     });
   });
 
+  it('通知的称呼：申请人的昵称为空时回退到登录名', async () => {
+    const ctx = createService();
+    setupApply(ctx);
+    ctx.prisma.user.findFirstOrThrow.mockResolvedValue({
+      nickname: '',
+      username: 'bob',
+    });
+
+    await ctx.service.apply('9', '5', {});
+
+    expect(ctx.prisma.user.findFirstOrThrow).toHaveBeenCalledWith({
+      where: { id: 9n, deleted: 0 },
+      select: { nickname: true, username: true },
+    });
+    expect(ctx.notifications.pushInTransaction).toHaveBeenCalledWith(ctx.tx, {
+      toUserId: 1n,
+      type: 'team_apply',
+      title: 'bob 申请加入你的帖子《互联网+项目招前端》',
+      refType: 'community_post',
+      refId: 5n,
+    });
+  });
+
   it('帖子不存在 → 404；申请自己的帖子 → 400', async () => {
     const ctx = createService();
     ctx.prisma.communityPost.findFirst.mockResolvedValue(null);
@@ -486,6 +509,44 @@ describe('CommunityApplicationsService.approve', () => {
     // 名额已满但不从「已停止」改成「已满员」：帖子只被更新了一次（绑定课题组）
     expect(ctx.tx.communityPost.update).toHaveBeenCalledTimes(1);
     expect(result.post.status).toBe('closed');
+  });
+
+  it('审批通知的称呼：发帖人的昵称为空时回退到登录名（通过 / 拒绝）', async () => {
+    const cases = [
+      [
+        'approve',
+        'team_apply_approved',
+        'alice 通过了你加入《互联网+项目招前端》的申请',
+      ],
+      [
+        'reject',
+        'team_apply_rejected',
+        'alice 拒绝了你加入《互联网+项目招前端》的申请',
+      ],
+    ] as const;
+    for (const [action, type, title] of cases) {
+      const ctx = createService();
+      // 帖子已绑定课题组：不触发自动建组，只看通知文案
+      setupHandle(ctx, { post: { teamId: 7n } });
+      ctx.prisma.user.findFirstOrThrow.mockResolvedValue({
+        nickname: '',
+        username: 'alice',
+      });
+
+      await ctx.service[action]('1', '31');
+
+      expect(ctx.prisma.user.findFirstOrThrow).toHaveBeenCalledWith({
+        where: { id: 1n, deleted: 0 },
+        select: { nickname: true, username: true },
+      });
+      expect(ctx.notifications.pushInTransaction).toHaveBeenCalledWith(ctx.tx, {
+        toUserId: 9n,
+        type,
+        title,
+        refType: 'community_post',
+        refId: 5n,
+      });
+    }
   });
 
   it('名额被并发占满 → 409，不建组、不入组、不通知', async () => {
