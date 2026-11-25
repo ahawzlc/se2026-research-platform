@@ -1,6 +1,7 @@
 import { FriendsService } from './friends.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { RateLimitService } from '../auth/rate-limit.service';
 
 /** friendship 表一行快照 */
 function buildFriendship(overrides: Record<string, unknown> = {}) {
@@ -55,11 +56,14 @@ function createService() {
     $transaction: jest.fn((ops: unknown[]) => Promise.all(ops)),
   };
   const notifications = { push: jest.fn() };
+  // 限流默认放行；需要测限流时单独覆盖 hit 的返回值
+  const rateLimit = { hit: jest.fn().mockReturnValue(true) };
   const service = new FriendsService(
     prisma as unknown as PrismaService,
     notifications as unknown as NotificationsService,
+    rateLimit as unknown as RateLimitService,
   );
-  return { service, prisma, notifications };
+  return { service, prisma, notifications, rateLimit };
 }
 
 /**
@@ -119,6 +123,47 @@ function stubFriendshipLookup(
   );
 }
 
+/**
+ * 让 user.findFirst 按查询条件分派。
+ *
+ * createRequest 会查两次 user：
+ *   - `where: { publicUid }` → 对方（peer）；
+ *   - `where: { id: me }`    → 当前登录用户（拼通知标题用，见缺陷 A1）。
+ * 早期版本两个查询都返回同一行，导致通知标题的主语取错。
+ */
+function stubUserLookup(
+  prisma: { user: { findFirst: jest.Mock } },
+  rules: {
+    /** 当前登录用户（id=1） */
+    me?: Record<string, unknown> | null;
+    /** 对方（uid 匹配） */
+    peer?: Record<string, unknown> | null;
+  },
+): void {
+  prisma.user.findFirst.mockImplementation(
+    (args: { where: Record<string, unknown> }) => {
+      const where = args.where;
+      if (where.publicUid !== undefined) {
+        return Promise.resolve(rules.peer ?? null);
+      }
+      if (where.id !== undefined) {
+        return Promise.resolve(rules.me ?? null);
+      }
+      return Promise.resolve(null);
+    },
+  );
+}
+
+/** 当前登录用户（张三），用于拼通知标题 */
+function buildMe(overrides: Record<string, unknown> = {}) {
+  return buildUser({
+    id: 1n,
+    username: 'zhangsan',
+    nickname: '张三',
+    ...overrides,
+  });
+}
+
 async function expectBizError(
   promise: Promise<unknown>,
   code: number,
@@ -130,7 +175,10 @@ async function expectBizError(
 describe('FriendsService.createRequest', () => {
   it('发起申请：新建 pending 行并给对方发通知', async () => {
     const { service, prisma, notifications } = createService();
-    prisma.user.findFirst.mockResolvedValue(buildUser());
+    stubUserLookup(prisma, {
+      peer: buildUser(),
+      me: buildMe(),
+    });
     stubFriendshipLookup(prisma, {});
     prisma.friendship.create.mockResolvedValue({ id: 50n });
     notifications.push.mockResolvedValue({});
@@ -150,9 +198,53 @@ describe('FriendsService.createRequest', () => {
     expect(result.direction).toBe('outgoing');
   });
 
+  /**
+   * 回归（缺陷 A1）：通知标题的主语必须是**发起人**。
+   *
+   * 早期版本用了 peer（对方）的昵称，导致收件人看到
+   * 「李四 请求加你为好友」——而收件人自己就是李四。
+   */
+  it('通知标题用发起人的称呼，不是对方的（缺陷 A1）', async () => {
+    const { service, prisma, notifications } = createService();
+    stubUserLookup(prisma, {
+      peer: buildUser({ nickname: '李四' }),
+      me: buildMe({ nickname: '张三' }),
+    });
+    stubFriendshipLookup(prisma, {});
+    prisma.friendship.create.mockResolvedValue({ id: 50n });
+    notifications.push.mockResolvedValue({});
+
+    await service.createRequest('1', { uid: 'U0000000002' });
+
+    expect(notifications.push).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'friend_request',
+        title: '张三 请求加你为好友',
+        toUserId: '2',
+      }),
+    );
+  });
+
+  it('发起人没设昵称时，通知标题回退到登录名', async () => {
+    const { service, prisma, notifications } = createService();
+    stubUserLookup(prisma, {
+      peer: buildUser({ nickname: '李四' }),
+      me: buildMe({ nickname: '', username: 'zhangsan' }),
+    });
+    stubFriendshipLookup(prisma, {});
+    prisma.friendship.create.mockResolvedValue({ id: 50n });
+    notifications.push.mockResolvedValue({});
+
+    await service.createRequest('1', { uid: 'U0000000002' });
+
+    expect(notifications.push).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'zhangsan 请求加你为好友' }),
+    );
+  });
+
   it('UID 不存在 → 404', async () => {
     const { service, prisma } = createService();
-    prisma.user.findFirst.mockResolvedValue(null);
+    stubUserLookup(prisma, { peer: null, me: buildMe() });
     await expectBizError(
       service.createRequest('1', { uid: 'U0000000999' }),
       404,
@@ -162,7 +254,7 @@ describe('FriendsService.createRequest', () => {
 
   it('不能加自己为好友 → 400', async () => {
     const { service, prisma } = createService();
-    prisma.user.findFirst.mockResolvedValue(buildUser({ id: 1n }));
+    stubUserLookup(prisma, { peer: buildUser({ id: 1n }), me: buildMe() });
     await expectBizError(
       service.createRequest('1', { uid: 'U0000000001' }),
       400,
@@ -172,7 +264,7 @@ describe('FriendsService.createRequest', () => {
 
   it('已是好友 → 409', async () => {
     const { service, prisma } = createService();
-    prisma.user.findFirst.mockResolvedValue(buildUser());
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
     stubFriendshipLookup(prisma, {
       accepted: buildFriendship({
         status: 'accepted',
@@ -189,7 +281,7 @@ describe('FriendsService.createRequest', () => {
 
   it('对方已申请我 → 409（不重复插入）', async () => {
     const { service, prisma } = createService();
-    prisma.user.findFirst.mockResolvedValue(buildUser());
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
     stubFriendshipLookup(prisma, {
       rows: [
         buildFriendship({
@@ -209,7 +301,7 @@ describe('FriendsService.createRequest', () => {
 
   it('我已申请过且仍 pending → 409', async () => {
     const { service, prisma } = createService();
-    prisma.user.findFirst.mockResolvedValue(buildUser());
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
     stubFriendshipLookup(prisma, {
       rows: [buildFriendship({ status: 'pending' })],
     });
@@ -222,7 +314,7 @@ describe('FriendsService.createRequest', () => {
 
   it('被拒后可再次申请：复用同一行改回 pending', async () => {
     const { service, prisma } = createService();
-    prisma.user.findFirst.mockResolvedValue(buildUser());
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
     stubFriendshipLookup(prisma, {
       rows: [buildFriendship({ status: 'rejected' })],
     });
@@ -252,7 +344,7 @@ describe('FriendsService.createRequest', () => {
    */
   it('删除好友后可重新加：复活已软删的行，不 create 新行', async () => {
     const { service, prisma } = createService();
-    prisma.user.findFirst.mockResolvedValue(buildUser());
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
     stubFriendshipLookup(prisma, {
       rows: [buildFriendship({ status: 'accepted', deleted: 1 })],
     });
@@ -275,7 +367,7 @@ describe('FriendsService.createRequest', () => {
 
   it('已软删且状态仍是 pending 的行也可复活（不撞唯一键）', async () => {
     const { service, prisma } = createService();
-    prisma.user.findFirst.mockResolvedValue(buildUser());
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
     stubFriendshipLookup(prisma, {
       rows: [buildFriendship({ status: 'pending', deleted: 1 })],
     });
@@ -305,7 +397,7 @@ describe('FriendsService.createRequest', () => {
    */
   it('对方之前申请过我：复用那一行并翻转方向，不插第二行', async () => {
     const { service, prisma } = createService();
-    prisma.user.findFirst.mockResolvedValue(buildUser());
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
     stubFriendshipLookup(prisma, {
       rows: [
         buildFriendship({
@@ -334,7 +426,7 @@ describe('FriendsService.createRequest', () => {
 
   it('两人之间存在重复行：物理删除多余行，只留一行', async () => {
     const { service, prisma } = createService();
-    prisma.user.findFirst.mockResolvedValue(buildUser());
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
     stubFriendshipLookup(prisma, {
       rows: [
         buildFriendship({
@@ -362,6 +454,99 @@ describe('FriendsService.createRequest', () => {
       where: { id: { in: [51n] } },
     });
   });
+
+  /**
+   * 防骚扰 1（评审意见 D3）：被拒冷却期内不能再向同一人申请。
+   *
+   * 拒绝是静默的（不给拒绝方发通知），若不设冷却，
+   * 「被拒 → 立刻再发」就成了不受打扰的骚扰通道。
+   */
+  it('被拒冷却期内再次申请 → 409（并说明剩余天数）', async () => {
+    const { service, prisma } = createService();
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
+    // 一小时前被拒。
+    // 注意 findFirst 要按 where 分派：areFriends 查的是 status='accepted'，
+    // 冷却期查的是 status='rejected'，两者必须返回不同的行。
+    prisma.friendship.findFirst.mockImplementation(
+      (args: { where: Record<string, unknown> }) =>
+        Promise.resolve(
+          args.where.status === 'accepted'
+            ? null
+            : buildFriendship({
+                status: 'rejected',
+                requesterId: 1n,
+                addresseeId: 2n,
+                handledAt: new Date(Date.now() - 60 * 60 * 1000),
+              }),
+        ),
+    );
+
+    await expectBizError(
+      service.createRequest('1', { uid: 'U0000000002' }),
+      409,
+      '对方刚刚拒绝过你的好友申请，3 天内不能再发起申请',
+    );
+    expect(prisma.friendship.create).not.toHaveBeenCalled();
+    expect(prisma.friendship.update).not.toHaveBeenCalled();
+  });
+
+  it('冷却期已过 → 可以再次申请', async () => {
+    const { service, prisma } = createService();
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
+    // 4 天前被拒（冷却期 3 天）
+    prisma.friendship.findFirst.mockImplementation(
+      (args: { where: Record<string, unknown> }) =>
+        Promise.resolve(
+          args.where.status === 'accepted'
+            ? null
+            : buildFriendship({
+                status: 'rejected',
+                requesterId: 1n,
+                addresseeId: 2n,
+                handledAt: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000),
+              }),
+        ),
+    );
+    stubFriendshipLookup(prisma, {});
+    prisma.friendship.create.mockResolvedValue({ id: 50n });
+
+    await service.createRequest('1', { uid: 'U0000000002' });
+
+    expect(prisma.friendship.create).toHaveBeenCalled();
+  });
+
+  /**
+   * 防骚扰 2（评审意见 D3）：每人每天的申请次数上限。
+   */
+  it('超出每日申请上限 → 400 并说明上限', async () => {
+    const { service, prisma, rateLimit } = createService();
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
+    prisma.friendship.findFirst.mockResolvedValue(null);
+    rateLimit.hit.mockReturnValue(false);
+
+    await expectBizError(
+      service.createRequest('1', { uid: 'U0000000002' }),
+      400,
+      '今日好友申请次数已达上限（20 次），请明天再试',
+    );
+    expect(prisma.friendship.create).not.toHaveBeenCalled();
+  });
+
+  it('限流按「发起人」维度计数', async () => {
+    const { service, prisma, rateLimit } = createService();
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
+    prisma.friendship.findFirst.mockResolvedValue(null);
+    stubFriendshipLookup(prisma, {});
+    prisma.friendship.create.mockResolvedValue({ id: 50n });
+
+    await service.createRequest('1', { uid: 'U0000000002' });
+
+    expect(rateLimit.hit).toHaveBeenCalledWith(
+      'friend-request:1',
+      20,
+      24 * 60 * 60 * 1000,
+    );
+  });
 });
 
 describe('FriendsService.acceptRequest', () => {
@@ -385,6 +570,39 @@ describe('FriendsService.acceptRequest', () => {
       expect.objectContaining({ type: 'friend_accepted' }),
     );
     expect(result.id).toBe('1');
+  });
+
+  /**
+   * 回归（缺陷 A1）：同意通知的主语必须是**同意人**（当前登录用户）。
+   *
+   * 早期版本用了 requester（申请方）的昵称，导致申请方看到
+   * 「张三 已同意你的好友申请」——而申请方自己就是张三。
+   */
+  it('同意通知标题用同意人的称呼，不是申请方的（缺陷 A1）', async () => {
+    const { service, prisma, notifications } = createService();
+    prisma.friendship.findFirst.mockResolvedValue(
+      buildFriendship({
+        status: 'pending',
+        addresseeId: 2n,
+        requester: buildUser({ id: 1n, nickname: '张三' }),
+      }),
+    );
+    prisma.friendship.update.mockResolvedValue({});
+    notifications.push.mockResolvedValue({});
+    // 当前登录用户是 id=2（点「同意」的人），昵称「李四」
+    stubUserLookup(prisma, {
+      me: buildUser({ id: 2n, username: 'lisi', nickname: '李四' }),
+    });
+
+    await service.acceptRequest('2', '50');
+
+    expect(notifications.push).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'friend_accepted',
+        title: '李四 已同意你的好友申请',
+        toUserId: '1',
+      }),
+    );
   });
 
   it('不是接收方 → 404（不能替别人同意）', async () => {
@@ -439,6 +657,50 @@ describe('FriendsService.rejectRequest', () => {
       409,
       '已是好友，不能拒绝',
     );
+  });
+});
+
+describe('FriendsService.withdrawRequest', () => {
+  it('撤回：pending 改成 rejected，不发通知', async () => {
+    const { service, prisma, notifications } = createService();
+    prisma.friendship.findFirst.mockResolvedValue(
+      buildFriendship({ status: 'pending', requesterId: 1n, addresseeId: 2n }),
+    );
+    prisma.friendship.update.mockResolvedValue({});
+
+    await service.withdrawRequest('1', '50');
+
+    const updateCalls = prisma.friendship.update.mock.calls as unknown as Array<
+      [{ data: { status: string; handledAt: Date } }]
+    >;
+    expect(updateCalls[0][0].data.status).toBe('rejected');
+    expect(notifications.push).not.toHaveBeenCalled();
+  });
+
+  it('不能撤回别人的申请 → 404', async () => {
+    const { service, prisma } = createService();
+    prisma.friendship.findFirst.mockResolvedValue(
+      buildFriendship({ status: 'pending', requesterId: 2n, addresseeId: 1n }),
+    );
+    await expectBizError(
+      service.withdrawRequest('1', '50'),
+      404,
+      '好友申请不存在或不是你发出的',
+    );
+    expect(prisma.friendship.update).not.toHaveBeenCalled();
+  });
+
+  it('申请已被处理 → 409（无法撤回）', async () => {
+    const { service, prisma } = createService();
+    prisma.friendship.findFirst.mockResolvedValue(
+      buildFriendship({ status: 'accepted', requesterId: 1n, addresseeId: 2n }),
+    );
+    await expectBizError(
+      service.withdrawRequest('1', '50'),
+      409,
+      '该申请已被处理，无法撤回',
+    );
+    expect(prisma.friendship.update).not.toHaveBeenCalled();
   });
 });
 
