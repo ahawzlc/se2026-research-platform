@@ -52,6 +52,18 @@ export class FriendsController {
     return;
   }
 
+  @Delete('requests/:id')
+  @ApiOperation({
+    summary: '撤回我发出的好友申请（仅申请方本人、仅 pending 状态）',
+  })
+  async withdraw(
+    @CurrentUser() user: CurrentUserPayload,
+    @Param('id') id: string,
+  ): Promise<void> {
+    await this.friends.withdrawRequest(user.userId, id);
+    return;
+  }
+
   @Delete(':id')
   @ApiOperation({
     summary: '删除好友（逻辑删除，双方列表同时不可见）',

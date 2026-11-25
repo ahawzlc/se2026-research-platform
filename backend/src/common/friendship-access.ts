@@ -130,12 +130,13 @@ export async function listIncomingRequests(
   Array<{
     id: string;
     status: string;
-    createdAt: string;
+    /** 申请时间（毫秒时间戳，由调用方用 formatDateTime 转换） */
+    createdAt: Date;
     requester: {
       id: string;
-      username: string;
       nickname: string;
       avatar: string;
+      publicUid: string;
       bio: string;
     };
   }>
@@ -151,9 +152,9 @@ export async function listIncomingRequests(
       requester: {
         select: {
           id: true,
-          username: true,
           nickname: true,
           avatar: true,
+          publicUid: true,
           bio: true,
         },
       },
@@ -164,12 +165,14 @@ export async function listIncomingRequests(
   return rows.map((row) => ({
     id: row.id.toString(),
     status: row.status,
-    createdAt: row.createdAt.toISOString(),
+    // 直接给 Date，调用方统一用 formatDateTime 转北京时间
+    // （早期版本在这里 toISOString()、调用方再 new Date() 转回来，多绕一圈）
+    createdAt: row.createdAt,
     requester: {
       id: row.requester.id.toString(),
-      username: row.requester.username,
       nickname: row.requester.nickname,
       avatar: row.requester.avatar,
+      publicUid: row.requester.publicUid ?? '',
       bio: row.requester.bio,
     },
   }));

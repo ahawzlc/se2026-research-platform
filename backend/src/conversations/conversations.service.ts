@@ -3,7 +3,11 @@ import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BizException } from '../common/result';
 import { formatDateTime, toIdString } from '../common/datetime';
-import { parseId, requireTeamMembership } from '../common/team-access';
+import {
+  listUserTeamIds,
+  parseId,
+  requireTeamMembership,
+} from '../common/team-access';
 import { areFriends } from '../common/friendship-access';
 import type {
   CreateGroupConversationDto,
@@ -253,11 +257,13 @@ export class ConversationsService {
    * 创建/获取私信会话（线③ 卡 E-3 调整了权限口径）。
    *
    * **旧口径**：双方必须在同一课题组（docs/09 原红线 9 的过严版本）。
-   * **新口径**（本卡明确决策，用户 2026-11-23 拍板）：
+   * **新口径**（2026-11-24 牵头人确认，docs/12 决策点 3）：
    *   - 任何登录用户都可以给任何其他登录用户发私信——不再要求同组，
    *     因为"通过 UID 加好友→私信"是本卡的核心链路，若强制同组则加好友无意义；
-   *   - 但**非好友之间限制发言**：同一对非好友的私信会话里，
-   *     每个方向最多发 1 条（首次打招呼模式）；成为好友后解除限制。
+   *   - 但**非好友且不同组之间限制发言**：同一对用户的私信会话里，
+   *     每个方向最多发 1 条（首次打招呼模式）；
+   *   - **同组或好友都不受限**（同组豁免见 assertMessageAllowed 的说明：
+   *     否则部署前就存在的存量会话会被永久冻结）。
    *
    * 这样既满足"任何人可发起搭话"，又避免陌生人刷屏骚扰。
    */
@@ -314,8 +320,9 @@ export class ConversationsService {
   /**
    * 按 UID 打开/创建与某用户的私信会话（线③ 卡 E-3）。
    *
-   * 好友页与个人主页只有对方的 UID（不暴露 user.id），故先解析 UID 再走
-   * ensurePrivateConversation 的同一套逻辑，保证两条入口行为一致。
+   * 好友页与个人主页以 UID 作为对外标识，故提供按 UID 的入口，
+   * 服务层先解析 UID 再走 ensurePrivateConversation 的同一套逻辑，
+   * 保证两条入口行为一致。
    */
   async openPrivateConversationByUid(
     userId: string,
@@ -472,8 +479,16 @@ export class ConversationsService {
   /**
    * 非好友发言限制检查（线③ 卡 E-3）。
    *
-   * 规则：private 会话中，若发送方与对方不是好友，
-   * 则该方向已发出的消息数必须 < 1（即最多 1 条）。
+   * 规则（2026-11-24 牵头人确认，docs/12 决策点 3）：
+   *   - private 会话中，若发送方与对方**既不是好友、也不在同一个课题组**，
+   *     则该方向已发出的消息数必须 < 1（即最多 1 条）；
+   *   - **同组或好友都不受限**。
+   *
+   * 为什么必须豁免同组（缺陷 A2）：
+   * `friendship` 是本卡新增的表，部署前就存在的私信会话里双方都不是好友。
+   * 若只按「是否好友」判定，部署后只要任一方之前发过消息，
+   * 那个会话就会被永久冻结（发第二条即 403），而用户没有别的入口——
+   * 这是上线即炸的缺陷。同组豁免让存量会话恢复正常。
    *
    * 非 private 会话（group / comment / meeting）不受此限制。
    */
@@ -506,6 +521,12 @@ export class ConversationsService {
       return; // 好友不受限
     }
 
+    // 同组豁免：双方在任一课题组内即不受限（存量会话不至于被冻结）
+    const sameTeam = await this.sharesTeam(senderId, peerMember.userId);
+    if (sameTeam) {
+      return;
+    }
+
     const sentCount = await this.prisma.message.count({
       where: { conversationId, senderId, deleted: 0 },
     });
@@ -514,6 +535,15 @@ export class ConversationsService {
         '你们还不是好友，每个方向只能发一条消息；加为好友后可自由交流',
       );
     }
+  }
+
+  /** 两人是否在至少一个共同的课题组里 */
+  private async sharesTeam(userA: bigint, userB: bigint): Promise<boolean> {
+    const teamsA = await listUserTeamIds(this.prisma, userA.toString());
+    if (teamsA.length === 0) return false;
+    const teamsB = await listUserTeamIds(this.prisma, userB.toString());
+    const setB = new Set(teamsB.map((id) => id.toString()));
+    return teamsA.some((id) => setB.has(id.toString()));
   }
 
   /** 未读汇总：当前用户所有会话的未读数，供前端 30s 轮询 */

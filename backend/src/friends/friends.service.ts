@@ -11,12 +11,25 @@ import {
   listIncomingRequests,
 } from '../common/friendship-access';
 import { NotificationsService } from '../notifications/notifications.service';
+import { RateLimitService } from '../auth/rate-limit.service';
+import {
+  FRIEND_REQUEST_COOLDOWN_MS,
+  FRIEND_REQUEST_DAILY_LIMIT,
+  FRIEND_REQUEST_DAY_MS,
+  FRIEND_REQUEST_WINDOW_MS,
+} from './friends.constants';
 import type { CreateFriendRequestDto } from './dto/create-friend-request.dto';
 
 /** 好友条目（好友列表 / 申请列表通用） */
 export interface FriendItem {
   id: string;
-  username: string;
+  /**
+   * 登录名。
+   *
+   * **不返回**（评审意见 C2②）：引入 UID 的理由之一就是「登录名不愿被展示」，
+   * 好友列表 / 申请列表都可能被他人看到，故一律不带 username。
+   * 前端用 `nickname || publicUid` 兜底展示。
+   */
   nickname: string;
   avatar: string;
   publicUid: string;
@@ -57,6 +70,7 @@ export class FriendsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly rateLimit: RateLimitService,
   ) {}
 
   // ================================================================ 好友列表
@@ -79,7 +93,6 @@ export class FriendsService {
       where: { id: { in: friendIds }, deleted: 0 },
       select: {
         id: true,
-        username: true,
         nickname: true,
         avatar: true,
         publicUid: true,
@@ -90,7 +103,6 @@ export class FriendsService {
 
     const list = rows.map((row) => ({
       id: toIdString(row.id),
-      username: row.username,
       nickname: row.nickname,
       avatar: row.avatar,
       publicUid: row.publicUid ?? '',
@@ -151,6 +163,28 @@ export class FriendsService {
     const alreadyFriends = await areFriends(this.prisma, me, peer.id);
     if (alreadyFriends) {
       throw BizException.conflict('你们已经是好友了');
+    }
+
+    // 防骚扰 1：被拒冷却期（评审意见 D3）
+    // 被对方拒绝后，短期内不允许再向同一人发起申请，
+    // 防止「被拒 → 立刻再发」的定向骚扰（拒绝是静默的，对方不会被打扰到）。
+    const cooldown = await this.checkCooldown(me, peer.id);
+    if (cooldown) {
+      throw BizException.conflict(cooldown);
+    }
+
+    // 防骚扰 2：每人每天的申请次数上限
+    // 挡住「拿到 UID 批量发申请」的机器行为（每发一次都会给对方推一条通知）。
+    if (
+      !this.rateLimit.hit(
+        `friend-request:${me.toString()}`,
+        FRIEND_REQUEST_DAILY_LIMIT,
+        FRIEND_REQUEST_WINDOW_MS,
+      )
+    ) {
+      throw BizException.param(
+        `今日好友申请次数已达上限（${FRIEND_REQUEST_DAILY_LIMIT} 次），请明天再试`,
+      );
     }
 
     // 双向查一次：确保「一对用户至多一行」
@@ -221,10 +255,18 @@ export class FriendsService {
     }
 
     // 通知对方（通知失败不回滚申请——申请已落库，铃铛轮询可兜底）
+    //
+    // 标题里的主语是**发起人**（当前登录用户），不是接收人。
+    // 早期版本误用了 peer 的昵称，导致收件人看到「李四 请求加你为好友」
+    // 而他自己就是李四（详见 docs/17-线③开发留痕.md 缺陷 A1）。
+    const meRow = await this.prisma.user.findFirst({
+      where: { id: me, deleted: 0 },
+      select: { username: true, nickname: true },
+    });
     await this.pushSafely({
       toUserId: peer.id.toString(),
       type: 'friend_request',
-      title: `${this.displayName(peer.nickname, peer.username)} 请求加你为好友`,
+      title: `${this.displayName(meRow?.nickname ?? '', meRow?.username ?? '')} 请求加你为好友`,
       refType: 'friendship',
       refId: requestId,
     });
@@ -232,7 +274,6 @@ export class FriendsService {
     return {
       requestId: requestId.toString(),
       id: toIdString(peer.id),
-      username: peer.username,
       nickname: peer.nickname,
       avatar: peer.avatar,
       publicUid: peer.publicUid ?? '',
@@ -263,7 +304,6 @@ export class FriendsService {
         requester: {
           select: {
             id: true,
-            username: true,
             nickname: true,
             avatar: true,
             publicUid: true,
@@ -288,13 +328,19 @@ export class FriendsService {
       data: { status: FRIENDSHIP_STATUS.ACCEPTED, handledAt: new Date() },
     });
 
+    // 通知申请方。
+    //
+    // 标题里的主语是**同意人**（当前登录用户），不是申请方。
+    // 早期版本误用了 requester 的昵称，导致申请方看到「李四 已同意你的好友申请」
+    // 而他自己就是李四（详见 docs/17-线③开发留痕.md 缺陷 A1）。
+    const meRow = await this.prisma.user.findFirst({
+      where: { id: me, deleted: 0 },
+      select: { username: true, nickname: true },
+    });
     await this.pushSafely({
       toUserId: row.requesterId.toString(),
       type: 'friend_accepted',
-      title: `${this.displayName(
-        row.requester.nickname,
-        row.requester.username,
-      )} 已同意你的好友申请`,
+      title: `${this.displayName(meRow?.nickname ?? '', meRow?.username ?? '')} 已同意你的好友申请`,
       refType: 'friendship',
       refId: row.id,
     });
@@ -337,6 +383,48 @@ export class FriendsService {
     // 拒绝不发通知（静默处理）
   }
 
+  /**
+   * 撤回我发出的好友申请（评审意见 E4）。
+   *
+   * 约束：
+   *   - 只能撤回**自己**发出的申请（我是 requester）；
+   *   - 只能撤回 **pending** 状态的申请（对方已处理的就不能撤了）。
+   *
+   * 状态流转：pending → rejected。
+   *
+   * 为什么用 rejected 而不是物理删行 / 新增一个 cancelled 状态：
+   *   - 唯一键 `uk_friendship` 不区分 deleted，物理删行会腾出键，
+   *     与「一对用户至多一行」的不变式冲突（下次申请会插新行）；
+   *   - rejected 是现有状态机里已有的终态，复用它不必改 schema；
+   *   - 撤回后仍会受**被拒冷却期**约束（见 friends.constants.ts），
+   *     这是有意的：撤回也是一种「对方没接受」的信号，
+   *     防止「发申请→被拒→撤回→再发」无限循环骚扰。
+   */
+  async withdrawRequest(userId: string, requestIdParam: string): Promise<void> {
+    const requestId = parseId(requestIdParam);
+    if (requestId === null) {
+      throw BizException.notFound('好友申请不存在');
+    }
+    const me = BigInt(userId);
+
+    const row = await this.prisma.friendship.findFirst({
+      where: { id: requestId, deleted: 0 },
+      select: { id: true, requesterId: true, status: true },
+    });
+    if (!row || row.requesterId !== me) {
+      throw BizException.notFound('好友申请不存在或不是你发出的');
+    }
+    if (row.status !== FRIENDSHIP_STATUS.PENDING) {
+      throw BizException.conflict('该申请已被处理，无法撤回');
+    }
+
+    await this.prisma.friendship.update({
+      where: { id: row.id },
+      data: { status: FRIENDSHIP_STATUS.REJECTED, handledAt: new Date() },
+    });
+    // 撤回不发通知（对方本来就不需要知道）
+  }
+
   // ================================================================ 申请列表
 
   /**
@@ -354,12 +442,11 @@ export class FriendsService {
     const incoming: FriendRequestItem[] = incomingRows.map((row) => ({
       requestId: row.id,
       id: row.requester.id,
-      username: row.requester.username,
       nickname: row.requester.nickname,
       avatar: row.requester.avatar,
-      publicUid: '',
+      publicUid: row.requester.publicUid,
       bio: row.requester.bio,
-      createdAt: formatDateTime(new Date(row.createdAt)),
+      createdAt: formatDateTime(row.createdAt),
       direction: 'incoming',
     }));
 
@@ -373,7 +460,6 @@ export class FriendsService {
         addressee: {
           select: {
             id: true,
-            username: true,
             nickname: true,
             avatar: true,
             publicUid: true,
@@ -386,7 +472,6 @@ export class FriendsService {
     const outgoing: FriendRequestItem[] = outgoingRows.map((row) => ({
       requestId: row.id.toString(),
       id: toIdString(row.addressee.id),
-      username: row.addressee.username,
       nickname: row.addressee.nickname,
       avatar: row.addressee.avatar,
       publicUid: row.addressee.publicUid ?? '',
@@ -437,9 +522,45 @@ export class FriendsService {
 
   // ================================================================ 内部
 
+  /**
+   * 被拒冷却期检查（评审意见 D3）。
+   *
+   * 命中条件：存在一行 `status=rejected` 的关系行，且**我是申请方**。
+   * （「一对用户至多一行」的不变式下，被拒的行方向就是当时的申请方向。）
+   *
+   * @returns 冷却期内返回给用户看的提示（含剩余天数）；不在冷却期返回 null
+   */
+  private async checkCooldown(
+    requesterId: bigint,
+    addresseeId: bigint,
+  ): Promise<string | null> {
+    const rejected = await this.prisma.friendship.findFirst({
+      where: {
+        deleted: 0,
+        status: FRIENDSHIP_STATUS.REJECTED,
+        // 我是申请方 → 这一行代表「我的申请被拒了」
+        requesterId,
+        addresseeId,
+      },
+      select: { handledAt: true },
+    });
+    if (!rejected || !rejected.handledAt) {
+      return null;
+    }
+
+    const elapsed = Date.now() - rejected.handledAt.getTime();
+    if (elapsed >= FRIEND_REQUEST_COOLDOWN_MS) {
+      return null; // 冷却期已过
+    }
+
+    const remainMs = FRIEND_REQUEST_COOLDOWN_MS - elapsed;
+    // 剩余天数按「天」向上取整：还剩 2.9 天 → 提示 3 天
+    const remainDays = Math.max(1, Math.ceil(remainMs / FRIEND_REQUEST_DAY_MS));
+    return `对方刚刚拒绝过你的好友申请，${remainDays} 天内不能再发起申请`;
+  }
+
   private toFriendItem(user: {
     id: bigint;
-    username: string;
     nickname: string;
     avatar: string;
     publicUid: string | null;
@@ -447,7 +568,6 @@ export class FriendsService {
   }): FriendItem {
     return {
       id: toIdString(user.id),
-      username: user.username,
       nickname: user.nickname,
       avatar: user.avatar,
       publicUid: user.publicUid ?? '',

@@ -30,8 +30,12 @@ export class CreatePrivateConversationDto {
 /**
  * 按 UID 打开/创建私信会话入参（线③ 卡 E-3）。
  *
- * 好友页点「发私信」时，前端手里只有对方的 UID（不暴露 user.id），
- * 故提供按 UID 的入口，服务层先解析 UID 再走既有的 private 会话流程。
+ * 好友页点「发私信」时，前端手里只有对方的 UID，故提供按 UID 的入口，
+ * 服务层先解析 UID 再走既有的 private 会话流程。
+ *
+ * 注：返回的会话信息里带 `id`（内部主键），这是正常的——
+ * 「不暴露 id」指的是**入口参数**只认 UID，不提供「按 id 打开会话」的公开接口
+ * （评审意见 C2③）。
  */
 export class OpenPrivateConversationByUidDto {
   @ApiProperty({ description: '对方 UID，形如 U0000000123（大小写均可）' })
