@@ -19,6 +19,7 @@ import { AchievementsModule } from './achievements/achievements.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { UsersModule } from './users/users.module';
 import { FriendsModule } from './friends/friends.module';
+import { RateLimitModule } from './common/rate-limit.module';
 
 @Module({
   imports: [
@@ -42,6 +43,8 @@ import { FriendsModule } from './friends/friends.module';
     NotificationsModule,
     UsersModule,
     FriendsModule,
+    // 限流能力全局可用（好友申请防骚扰用，见 RateLimitModule 注释）
+    RateLimitModule,
   ],
   controllers: [HealthController],
   providers: [
