@@ -35,7 +35,7 @@ CREATE TABLE `user` (
   `nickname`            VARCHAR(50)     NOT NULL DEFAULT ''     COMMENT '昵称',
   `avatar`              VARCHAR(255)    NOT NULL DEFAULT ''     COMMENT '头像地址，空表示用昵称首字母生成默认头像',
   `email`               VARCHAR(100)    NOT NULL DEFAULT ''     COMMENT '邮箱',
-  `public_uid`          VARCHAR(20)     NULL                    COMMENT '对外展示的 UID，创建后不可变，唯一；NULL 表示尚未分配（存量用户由迁移脚本回填）',
+  `public_uid`          VARCHAR(20)     NULL                    COMMENT '对外展示的 UID，创建后不可变，唯一；NULL 表示尚未分配（存量用户首次访问 /users/me 时由应用层随机分配）',
   `bio`                 VARCHAR(500)    NOT NULL DEFAULT ''     COMMENT '个人简介',
   `profile_visibility`  VARCHAR(20)     NOT NULL DEFAULT 'public' COMMENT '主页可见范围：public 所有人可见 / friends 仅好友可见 / private 仅自己可见',
   `created_at`          DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
