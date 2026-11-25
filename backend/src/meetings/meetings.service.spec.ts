@@ -363,3 +363,95 @@ describe('MeetingsService.list', () => {
     expect(result).toEqual({ list: [], total: 0, page: 1, size: 10 });
   });
 });
+
+describe('MeetingsService.status（由时间推导，不入库）', () => {
+  const now = new Date('2026-11-23T16:00:00.000Z'); // 北京时间次日 00:00
+
+  beforeEach(() => jest.useFakeTimers().setSystemTime(now));
+  afterEach(() => jest.useRealTimers());
+
+  it.each([
+    ['未安排时间', null, 'unscheduled', ''],
+    [
+      '开始前 1 毫秒',
+      new Date(now.getTime() + 1),
+      'upcoming',
+      '2026-11-24 00:00:00',
+    ],
+    ['恰好开始', now, 'ongoing', '2026-11-24 00:00:00'],
+    [
+      '开始后 1 毫秒',
+      new Date(now.getTime() - 1),
+      'ongoing',
+      '2026-11-23 23:59:59',
+    ],
+    [
+      '开始后 119 分钟',
+      new Date(now.getTime() - 119 * 60_000),
+      'ongoing',
+      '2026-11-23 22:01:00',
+    ],
+    [
+      '默认时长结束前 1 毫秒',
+      new Date(now.getTime() - 120 * 60_000 + 1),
+      'ongoing',
+      '2026-11-23 22:00:00',
+    ],
+    [
+      '恰好开始后 120 分钟',
+      new Date(now.getTime() - 120 * 60_000),
+      'ended',
+      '2026-11-23 22:00:00',
+    ],
+    [
+      '开始后 121 分钟',
+      new Date(now.getTime() - 121 * 60_000),
+      'ended',
+      '2026-11-23 21:59:00',
+    ],
+    [
+      '超过 48 小时仍是未来会议',
+      new Date(now.getTime() + 72 * 3_600_000),
+      'upcoming',
+      '2026-11-27 00:00:00',
+    ],
+  ] as const)('%s', async (_label, heldAt, status, formatted) => {
+    const { service, prisma } = createService();
+    prisma.meeting.findFirst.mockResolvedValue(buildMeeting({ heldAt }));
+    prisma.project.findFirst.mockResolvedValue({ id: 3n, teamId: 7n });
+    prisma.teamMember.findFirst.mockResolvedValue({
+      teamId: 7n,
+      userId: 1n,
+      role: 'member',
+    });
+
+    const result = await service.detail('1', '5');
+
+    expect(result.status).toBe(status);
+    expect(result.heldAt).toBe(formatted);
+  });
+
+  it('列表也返回状态与北京时间，不依赖运行机器的本地时区', async () => {
+    const { service, prisma } = createService();
+    prisma.teamMember.findMany.mockResolvedValue([
+      { userId: 1n, teamId: 7n } as { userId: bigint },
+    ]);
+    prisma.meeting.count.mockResolvedValue(4);
+    prisma.meeting.findMany.mockResolvedValue([
+      buildMeeting({ heldAt: new Date(now.getTime() + 1000) }),
+      buildMeeting({ heldAt: new Date(now.getTime() - 1000) }),
+      buildMeeting({ heldAt: new Date(now.getTime() - 121 * 60_000) }),
+      buildMeeting({ heldAt: null }),
+    ]);
+
+    const result = await service.list('1', { page: 1, size: 10 });
+
+    expect(result.list.map((item) => item.status)).toEqual([
+      'upcoming',
+      'ongoing',
+      'ended',
+      'unscheduled',
+    ]);
+    expect(result.list[0].heldAt).toBe('2026-11-24 00:00:01');
+  });
+});

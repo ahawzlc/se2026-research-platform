@@ -41,7 +41,7 @@ function refTarget(item: NotificationItem): string {
     const tab = item.type === 'team_apply' ? '?tab=applications' : ''
     return `/community/${item.refId}${tab}`
   }
-  if (item.refType === 'meeting') return '/meetings'
+  if (item.refType === 'meeting') return `/meetings?meetingId=${encodeURIComponent(item.refId)}`
   if (item.refType === 'conversation') return '/messages'
   return ''
 }

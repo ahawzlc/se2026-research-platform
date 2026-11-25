@@ -6,7 +6,7 @@
 import { http } from './request'
 import type { PageQuery, PageResult } from './types'
 
-/** 通知类型（docs/12 卡 G-1 冻结；meeting_upcoming 为 F-2 占位） */
+/** 通知类型（meeting_upcoming 为会前一小时提醒） */
 export type NotificationType =
   | 'team_apply'
   | 'team_apply_approved'

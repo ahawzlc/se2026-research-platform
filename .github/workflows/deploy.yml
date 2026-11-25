@@ -68,6 +68,10 @@ jobs:
         working-directory: frontend
         run: npm run typecheck
 
+      - name: 前端 F-2 页面回归
+        working-directory: frontend
+        run: npm test
+
       - name: 前端 lint
         working-directory: frontend
         run: npm run lint
