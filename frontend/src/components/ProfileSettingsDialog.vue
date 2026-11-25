@@ -166,7 +166,7 @@ watch(visible, (open) => {
           ref="passwordFormRef"
           :model="passwordForm"
           :rules="passwordRules"
-          label-width="90px"
+          label-width="110px"
           @submit.prevent
         >
           <el-form-item label="旧密码" prop="oldPassword">

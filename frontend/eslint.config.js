@@ -29,7 +29,12 @@ export default tseslint.config(
         clearTimeout: 'readonly',
         setInterval: 'readonly',
         clearInterval: 'readonly',
-        HTMLElement: 'readonly'
+        HTMLElement: 'readonly',
+        // 头像上传前在浏览器端裁剪缩放（ProfileView 的 shrinkAvatar）
+        File: 'readonly',
+        Blob: 'readonly',
+        createImageBitmap: 'readonly',
+        URL: 'readonly'
       }
     }
   },

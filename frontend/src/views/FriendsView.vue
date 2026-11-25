@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { conversationsApi, friendsApi } from '@/api'
 import type { FriendItem, FriendRequestItem } from '@/api/friends'
 import UserAvatar from '@/components/UserAvatar.vue'
@@ -13,14 +13,22 @@ import { useUserStore } from '@/store/user'
  * 三个页签：
  *   - 好友：已互为好友的用户卡片，可发私信 / 删除好友；
  *   - 收到的申请：对方申请我，可同意 / 拒绝；
- *   - 发出的申请：我申请对方（等待处理）。
+ *   - 发出的申请：我申请对方（等待处理），可撤回。
  *
  * 「通过 UID 添加好友」在页签顶部，输入对方 UID 即可发起申请。
+ *
+ * ## 从通知跳转（评审意见 E3）
+ *
+ * 铃铛点「好友申请」通知要落到「收到的申请」页签，
+ * 所以挂载时要读 `route.query.tab`（铃铛跳的是 `/friends?tab=requests`）。
  */
+const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 
-const activeTab = ref('friends')
+type TabName = 'friends' | 'requests' | 'outgoing'
+
+const activeTab = ref<TabName>('friends')
 
 const friends = ref<FriendItem[]>([])
 const incoming = ref<FriendRequestItem[]>([])
@@ -55,11 +63,21 @@ async function handleAddFriend(): Promise<void> {
 
 const actionLoading = ref('')
 
+/**
+ * 展示用的称呼：昵称优先，为空则退到 UID。
+ *
+ * 后端在他人视角**不返回登录名**（评审意见 C2②），
+ * 所以这里不能再用 `nickname || username`。
+ */
+function displayName(item: { nickname: string; publicUid: string }): string {
+  return item.nickname || item.publicUid || '未命名用户'
+}
+
 async function handleAccept(item: FriendRequestItem): Promise<void> {
   actionLoading.value = item.requestId
   try {
     await friendsApi.acceptFriendRequest(item.requestId)
-    ElMessage.success(`已与 ${item.nickname || item.username} 成为好友`)
+    ElMessage.success(`已与 ${displayName(item)} 成为好友`)
     await loadAll()
   } catch {
     // 提示由拦截器统一处理
@@ -84,11 +102,54 @@ async function handleReject(item: FriendRequestItem): Promise<void> {
 // ---------------------------------------------------------------- 好友操作
 
 async function handleRemove(item: FriendItem): Promise<void> {
+  // 删除好友不可撤销：二次确认（评审意见 E4）
+  try {
+    await ElMessageBox.confirm(
+      `确定删除好友「${displayName(item)}」吗？删除后对方也会从你的好友列表消失，且需要重新发起申请才能恢复。`,
+      '删除好友',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消'
+      }
+    )
+  } catch {
+    return // 用户取消
+  }
+
   actionLoading.value = item.id
   try {
     await friendsApi.removeFriend(item.id)
     ElMessage.success('已删除好友')
     await loadFriends()
+  } catch {
+    // 提示由拦截器统一处理
+  } finally {
+    actionLoading.value = ''
+  }
+}
+
+/** 撤回我发出的申请（评审意见 E4） */
+async function handleWithdraw(item: FriendRequestItem): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `确定撤回发给「${displayName(item)}」的好友申请吗？撤回后短期内不能再次申请（3 天冷却）。`,
+      '撤回申请',
+      {
+        type: 'warning',
+        confirmButtonText: '撤回',
+        cancelButtonText: '取消'
+      }
+    )
+  } catch {
+    return // 用户取消
+  }
+
+  actionLoading.value = item.requestId
+  try {
+    await friendsApi.withdrawFriendRequest(item.requestId)
+    ElMessage.success('已撤回申请')
+    await loadRequests()
   } catch {
     // 提示由拦截器统一处理
   } finally {
@@ -136,6 +197,23 @@ async function loadAll(): Promise<void> {
 
 onMounted(loadAll)
 
+/**
+ * 从 URL 读初始页签（评审意见 E3）。
+ *
+ * 铃铛点「好友申请」通知跳的是 `/friends?tab=requests`，
+ * 若不读这个 query，用户会落在默认的「好友」页签，还得自己点一次。
+ */
+const TAB_NAMES: TabName[] = ['friends', 'requests', 'outgoing']
+
+function syncTabFromQuery(): void {
+  const tab = route.query.tab
+  if (typeof tab === 'string' && TAB_NAMES.includes(tab as TabName)) {
+    activeTab.value = tab as TabName
+  }
+}
+
+watch(() => route.query.tab, syncTabFromQuery, { immediate: true })
+
 /** 待处理申请数（给页签角标） */
 const pendingCount = computed(() => incoming.value.length)
 </script>
@@ -172,11 +250,11 @@ const pendingCount = computed(() => incoming.value.length)
               <UserAvatar
                 :src="item.avatar"
                 :nickname="item.nickname"
-                :username="item.username"
+                :public-uid="item.publicUid"
                 :size="48"
               />
               <div class="friend-card__name">
-                <div class="friend-card__nickname">{{ item.nickname || item.username }}</div>
+                <div class="friend-card__nickname">{{ displayName(item) }}</div>
                 <div class="friend-card__uid">{{ item.publicUid }}</div>
               </div>
             </div>
@@ -214,11 +292,11 @@ const pendingCount = computed(() => incoming.value.length)
               <UserAvatar
                 :src="item.avatar"
                 :nickname="item.nickname"
-                :username="item.username"
+                :public-uid="item.publicUid"
                 :size="44"
               />
               <div class="request-card__name">
-                <div class="request-card__nickname">{{ item.nickname || item.username }}</div>
+                <div class="request-card__nickname">{{ displayName(item) }}</div>
                 <div class="request-card__time">{{ item.createdAt }}</div>
               </div>
             </div>
@@ -251,13 +329,22 @@ const pendingCount = computed(() => incoming.value.length)
               <UserAvatar
                 :src="item.avatar"
                 :nickname="item.nickname"
-                :username="item.username"
+                :public-uid="item.publicUid"
                 :size="44"
               />
               <div class="request-card__name">
-                <div class="request-card__nickname">{{ item.nickname || item.username }}</div>
+                <div class="request-card__nickname">{{ displayName(item) }}</div>
                 <div class="request-card__time">{{ item.createdAt }} · 等待对方处理</div>
               </div>
+            </div>
+            <div class="request-card__actions">
+              <el-button
+                size="small"
+                :loading="actionLoading === item.requestId"
+                @click="handleWithdraw(item)"
+              >
+                撤回
+              </el-button>
             </div>
           </div>
         </div>

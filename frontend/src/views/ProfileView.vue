@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules, UploadRequestOptions } from 'element-plus'
@@ -63,10 +63,75 @@ const editRules: FormRules = {
 
 const uploading = ref(false)
 
+/** 头像原始文件大小上限（MB）——评审意见 D2 */
+const AVATAR_MAX_SIZE_MB = 2
+
+/** 头像压缩后的边长（像素）——评审意见 D2 */
+const AVATAR_TARGET_SIZE = 200
+
+/**
+ * 用 canvas 把头像缩放到 AVATAR_TARGET_SIZE 见方。
+ *
+ * 为什么要压缩（评审意见 D2）：
+ *   头像走的是**通用文件上传接口**（上限 50MB），前端不压缩的话，
+ *   一张手机原图能有好几 MB。而头像会在顶栏、好友列表、组队广场卡片里
+ *   **反复加载**——同一张大图被不同的人反复拉一遍，浪费带宽也拖慢页面。
+ *
+ * @returns 压缩后的 Blob；压缩失败返回 null（调用方退回原图）
+ */
+async function shrinkAvatar(file: File): Promise<Blob | null> {
+  try {
+    const bitmap = await createImageBitmap(file)
+    const canvas = document.createElement('canvas')
+    canvas.width = AVATAR_TARGET_SIZE
+    canvas.height = AVATAR_TARGET_SIZE
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    // 居中裁剪成正方形，避免拉伸变形
+    const side = Math.min(bitmap.width, bitmap.height)
+    const sx = (bitmap.width - side) / 2
+    const sy = (bitmap.height - side) / 2
+    ctx.drawImage(
+      bitmap,
+      sx,
+      sy,
+      side,
+      side,
+      0,
+      0,
+      AVATAR_TARGET_SIZE,
+      AVATAR_TARGET_SIZE
+    )
+    bitmap.close()
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.85)
+    })
+    return blob
+  } catch {
+    return null // 浏览器不支持 createImageBitmap 等情况，退回原图
+  }
+}
+
 async function handleAvatarUpload(options: UploadRequestOptions): Promise<void> {
+  const raw = options.file
+
+  // 先做大小限制，别让几十 MB 的文件进到上传接口
+  if (raw.size > AVATAR_MAX_SIZE_MB * 1024 * 1024) {
+    ElMessage.error(`头像不能超过 ${AVATAR_MAX_SIZE_MB}MB，请先压缩后再上传`)
+    return
+  }
+
   uploading.value = true
   try {
-    const item = await fileApi.uploadFile(options.file)
+    // 压缩后再上传
+    const blob = await shrinkAvatar(raw)
+    const uploadFile = blob
+      ? new File([blob], raw.name.replace(/\.\w+$/, '') + '.jpg', {
+          type: 'image/jpeg'
+        })
+      : raw
+
+    const item = await fileApi.uploadFile(uploadFile)
     editForm.avatar = item.url
     ElMessage.success('头像已上传，记得保存')
   } catch {
@@ -95,6 +160,14 @@ async function loadProfile(): Promise<void> {
 }
 
 onMounted(loadProfile)
+
+/**
+ * 切换查看的用户时重新加载。
+ *
+ * 从 /profile/1 点到 /profile/2 时，路由组件会被复用（不是重新挂载），
+ * 只靠 onMounted 的话页面还停在上一个人的资料上。
+ */
+watch(routeUserId, loadProfile)
 
 // ---------------------------------------------------------------- 编辑
 
@@ -236,12 +309,12 @@ async function copyUid(): Promise<void> {
           <UserAvatar
             :src="profile.avatar"
             :nickname="profile.nickname"
-            :username="profile.username"
+            :public-uid="profile.publicUid"
             :size="88"
           />
           <div class="profile-header__info">
             <div class="profile-header__name">
-              <span class="profile-header__nickname">{{ profile.nickname || profile.username }}</span>
+              <span class="profile-header__nickname">{{ profile.nickname || profile.publicUid }}</span>
               <el-tag v-if="profile.isSelf" size="small" type="info">这是你</el-tag>
             </div>
             <div class="profile-header__uid">
@@ -311,7 +384,7 @@ async function copyUid(): Promise<void> {
               <UserAvatar
                 :src="editForm.avatar"
                 :nickname="editForm.nickname"
-                :username="profile.username"
+                :public-uid="profile.publicUid"
                 :size="64"
               />
               <div class="avatar-editor__actions">
@@ -368,7 +441,8 @@ async function copyUid(): Promise<void> {
           </el-form-item>
 
           <el-form-item label="用户名">
-            <span class="fixed-value">{{ profile.username }}</span>
+            <!-- 登录名只有看自己时后端才返回（评审意见 C2②） -->
+            <span class="fixed-value">{{ profile.username ?? '—' }}</span>
           </el-form-item>
         </el-form>
 

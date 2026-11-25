@@ -1,12 +1,20 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 /**
  * 用户头像（线③ 卡 E-3）。
  *
  * 优先显示 user.avatar（走统一文件上传拿到的 URL）；
- * 没有上传头像时，用昵称首字母（或用户名首字母）生成彩色默认头像——
+ * 没有上传头像时，用昵称首字母生成彩色默认头像——
  * 新注册用户默认就有头像，不会出现一片空白。
+ *
+ * ## 兜底策略
+ *
+ * 1. **加载失败兜底**（评审建议）：头像地址可能已失效（文件被删、URL 写错），
+ *    `<el-avatar>` 直接渲染会显示破图。这里监听 `@error`，
+ *    把 src 清空、退回首字母头像——总比破图好。
+ * 2. **不展示登录名**（评审意见 C2②）：后端在他人视角不返回 username，
+ *    所以兜底只用昵称与 UID，不再有 username 这一路。
  */
 const props = withDefaults(
   defineProps<{
@@ -14,8 +22,8 @@ const props = withDefaults(
     src?: string
     /** 昵称，优先用于取首字母 */
     nickname?: string
-    /** 用户名，昵称为空时的兜底 */
-    username?: string
+    /** UID，昵称为空时的兜底（后端他人视角不返回 username） */
+    publicUid?: string
     /** 头像尺寸（像素） */
     size?: number
     /** 圆角：圆形头像传 true */
@@ -24,15 +32,31 @@ const props = withDefaults(
   {
     src: '',
     nickname: '',
-    username: '',
+    publicUid: '',
     size: 40,
     round: true
   }
 )
 
-/** 取首字母：昵称优先，其次用户名；中文取第一个字，英文取首字母大写 */
+/** 当前实际使用的图片地址；加载失败时置空以退回首字母头像 */
+const imageSrc = ref(props.src)
+
+// src 变化时重置（切换用户 / 重新保存头像后）
+watch(
+  () => props.src,
+  (val) => {
+    imageSrc.value = val
+  }
+)
+
+/** 图片加载失败：退回首字母头像，避免破图 */
+function handleError(): void {
+  imageSrc.value = ''
+}
+
+/** 取首字母：昵称优先，其次 UID；中文取第一个字，英文取首字母大写 */
 const initial = computed(() => {
-  const source = (props.nickname || props.username || '?').trim()
+  const source = (props.nickname || props.publicUid || '?').trim()
   if (!source) return '?'
   const first = [...source][0]
   return first.toUpperCase()
@@ -51,7 +75,7 @@ const PALETTE = [
 ]
 
 const bgColor = computed(() => {
-  const source = props.nickname || props.username || '?'
+  const source = props.nickname || props.publicUid || '?'
   let hash = 0
   for (const ch of source) {
     hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
@@ -68,11 +92,12 @@ const sizeStyle = computed(() => ({
 
 <template>
   <el-avatar
-    v-if="src"
-    :src="src"
+    v-if="imageSrc"
+    :src="imageSrc"
     :size="size"
     :shape="round ? 'circle' : 'square'"
     class="user-avatar"
+    @error="handleError"
   />
   <span
     v-else

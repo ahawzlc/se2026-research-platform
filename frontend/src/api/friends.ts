@@ -16,7 +16,14 @@ export type UserRelation = 'none' | 'pending_sent' | 'pending_received' | 'frien
 
 export interface UserProfile {
   id: string
-  username: string
+  /**
+   * 登录名。
+   *
+   * **只有看自己时后端才返回**（`isSelf === true`），
+   * 看别人的主页时是 undefined —— 引入 UID 的理由之一就是「登录名不愿被展示」。
+   * 展示时用 `nickname || publicUid` 兜底。
+   */
+  username?: string
   nickname: string
   avatar: string
   publicUid: string
@@ -36,7 +43,7 @@ export interface UpdateProfilePayload {
 
 export interface FriendItem {
   id: string
-  username: string
+  /** 后端不返回登录名（好友列表可能被他人看到） */
   nickname: string
   avatar: string
   publicUid: string
@@ -96,6 +103,11 @@ export function acceptFriendRequest(requestId: string) {
 /** 拒绝好友申请 */
 export function rejectFriendRequest(requestId: string) {
   return http.post<void>(`/api/v1/friends/requests/${requestId}/reject`)
+}
+
+/** 撤回我发出的好友申请（仅申请方本人、仅 pending） */
+export function withdrawFriendRequest(requestId: string) {
+  return http.delete<void>(`/api/v1/friends/requests/${requestId}`)
 }
 
 /** 删除好友（逻辑删除，双方同时不可见） */

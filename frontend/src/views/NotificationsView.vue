@@ -35,9 +35,14 @@ async function load() {
 }
 
 function refTarget(item: NotificationItem): string {
-  // 已知来源跳对应页面；community_post / friendship 待线②③页面落地后接入
+  // 已知来源跳对应页面；community_post 待线②页面落地后接入
   if (item.refType === 'meeting') return '/meetings'
   if (item.refType === 'conversation') return '/messages'
+  // 好友通知 → 好友页（线③ 卡 E-3，评审意见 E2）
+  // 「申请」类落到「收到的申请」页签，「通过」类落到「好友」页签
+  if (item.refType === 'friendship') {
+    return item.type === 'friend_request' ? '/friends?tab=requests' : '/friends?tab=friends'
+  }
   return ''
 }
 

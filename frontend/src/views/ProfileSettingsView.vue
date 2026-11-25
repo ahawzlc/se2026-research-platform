@@ -76,7 +76,7 @@ async function handleSubmit(): Promise<void> {
 
     <el-card class="settings-card" shadow="never">
       <template #header>修改密码</template>
-      <el-form ref="formRef" :model="form" :rules="rules" label-width="90px" @submit.prevent>
+      <el-form ref="formRef" :model="form" :rules="rules" label-width="110px" @submit.prevent>
         <el-form-item label="旧密码" prop="oldPassword">
           <el-input v-model="form.oldPassword" type="password" show-password />
         </el-form-item>
