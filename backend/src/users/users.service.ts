@@ -5,8 +5,10 @@ import { BizException } from '../common/result';
 import { formatDateTime, toIdString } from '../common/datetime';
 import { parseId } from '../common/team-access';
 import { areFriends } from '../common/friendship-access';
+import { isUniqueViolation } from '../common/prisma-errors';
 import {
   generatePublicUid,
+  isAllowedAvatarUrl,
   PROFILE_VISIBILITIES,
   type ProfileVisibility,
 } from './user.constants';
@@ -19,7 +21,14 @@ export type UserRelation =
 /** 对外暴露的用户主页资料（绝不含 passwordHash） */
 export interface UserProfileView {
   id: string;
-  username: string;
+  /**
+   * 登录名。
+   *
+   * **仅本人视角返回**（isSelf=true）；查看他人主页时不返回——
+   * 引入 UID 的理由之一就是「登录名不愿被展示」（评审意见 C2②）。
+   * 他人视角用 nickname（可为空串）与 publicUid 兜底展示。
+   */
+  username?: string;
   nickname: string;
   avatar: string;
   /** 对外 UID，唯一且创建后不可变 */
@@ -57,7 +66,10 @@ export class UsersService {
   /** 当前登录用户的完整主页信息 */
   async myProfile(userId: string): Promise<UserProfileView> {
     const user = await this.findActiveUser(userId);
-    return this.toProfileView(user, { relation: 'none', isSelf: true });
+    // 存量用户首次访问时懒分配 UID（迁移脚本不回填，见 ensurePublicUid 注释）
+    await this.ensurePublicUid(user.id);
+    const fresh = await this.findActiveUser(userId);
+    return this.toProfileView(fresh, { relation: 'none', isSelf: true });
   }
 
   /**
@@ -80,13 +92,26 @@ export class UsersService {
     }
 
     const user = await this.findActiveUser(userId);
+
+    // 昵称：trim 后不能是空串（评审意见 D1）
+    // 注册与 PUT /auth/profile 都要求 1-50 字符，这里保持一致。
+    // 早期版本只校验长度，实测传纯空格会落库成 ""，导致队友卡片显示空白。
+    const nickname = dto.nickname?.trim();
+    if (nickname !== undefined && nickname === '') {
+      throw BizException.param('昵称不能为空');
+    }
+
+    // 头像：只接受本站上传接口返回的地址（评审意见 D2）
+    const avatar = dto.avatar?.trim();
+    if (avatar !== undefined && !isAllowedAvatarUrl(avatar)) {
+      throw BizException.param('头像必须是本站上传接口返回的地址');
+    }
+
     const updated = await this.prisma.user.update({
       where: { id: user.id },
       data: {
-        ...(dto.nickname !== undefined
-          ? { nickname: dto.nickname.trim() }
-          : {}),
-        ...(dto.avatar !== undefined ? { avatar: dto.avatar.trim() } : {}),
+        ...(nickname !== undefined ? { nickname } : {}),
+        ...(avatar !== undefined ? { avatar } : {}),
         ...(dto.bio !== undefined ? { bio: dto.bio.trim() } : {}),
         ...(dto.profileVisibility !== undefined
           ? { profileVisibility: dto.profileVisibility }
@@ -200,7 +225,8 @@ export class UsersService {
   ): UserProfileView {
     return {
       id: toIdString(user.id),
-      username: user.username,
+      // 登录名只在「看自己」时返回（评审意见 C2②）
+      ...(extra.isSelf ? { username: user.username } : {}),
       nickname: user.nickname,
       avatar: user.avatar,
       publicUid: user.publicUid ?? '',
@@ -245,5 +271,53 @@ export class UsersService {
       }
     }
     throw BizException.internal('UID 分配失败，请重试');
+  }
+
+  /**
+   * 确保用户有 UID（懒分配）。
+   *
+   * 存量用户的 `public_uid` 是 NULL——迁移脚本**故意不回填**
+   * （用 id 回填等于让 UID 等于自增 id，照样可枚举，与引入 UID 的理由矛盾，
+   * 见评审意见 C2①）。改为用户**首次访问 `/users/me` 时**在这里随机分配。
+   *
+   * 顺带解决了「迁移已执行、部署未上线期间注册的用户没有 UID」的问题：
+   * 这类用户同样走这里补分配。
+   *
+   * 唯一索引 `uk_user_public_uid` 是硬约束，撞号就重试。
+   * 并发下两个请求可能同时分配到不同 UID，后写覆盖先写——
+   * 结果仍是一个合法且唯一的 UID，可接受。
+   */
+  async ensurePublicUid(userId: bigint): Promise<void> {
+    const user = await this.prisma.user.findFirst({
+      where: { id: userId, deleted: 0 },
+      select: { publicUid: true },
+    });
+    if (!user || user.publicUid) {
+      return; // 已有 UID，无需分配
+    }
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const candidate = generatePublicUid();
+      const exists = await this.prisma.user.findFirst({
+        where: { publicUid: candidate },
+        select: { id: true },
+      });
+      if (exists) {
+        continue; // 撞号，换一个
+      }
+      try {
+        await this.prisma.user.update({
+          where: { id: userId },
+          data: { publicUid: candidate },
+        });
+        return;
+      } catch (err) {
+        // 并发下可能撞唯一索引（P2002），重试即可；
+        // 其他错误（账号被删等）直接放弃，UID 只是展示用的标识，不该让主页打不开
+        if (!isUniqueViolation(err)) {
+          return;
+        }
+      }
+    }
   }
 }

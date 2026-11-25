@@ -35,3 +35,36 @@ export function generatePublicUid(): string {
   const num = Math.floor(Math.random() * max);
   return `${PUBLIC_UID_PREFIX}${String(num).padStart(PUBLIC_UID_DIGITS, '0')}`;
 }
+
+/**
+ * 头像地址允许的本站前缀（评审意见 D2）。
+ *
+ * 头像会在**所有看到它的人的浏览器**里加载——顶栏、好友列表、组队广场卡片，
+ * 每一处都是一个自动发起的外部请求。若允许存外站 URL，
+ * 攻击者就能借用户的头像位收集访问者的 IP / Referer（甚至做 CSRF 侧的探测）。
+ *
+ * 因此头像只接受本站文件上传接口（`/api/v1/files/...`）返回的相对地址。
+ * 空串是合法值——表示「用昵称首字母生成默认头像」。
+ */
+export const AVATAR_ALLOWED_PREFIX = '/api/v1/files/';
+
+/**
+ * 校验头像地址是否可接受。
+ *
+ * @returns true 表示可以落库
+ */
+export function isAllowedAvatarUrl(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    return true; // 空串 = 用默认头像
+  }
+  // 必须是本站相对路径，且以允许的前缀开头。
+  // 顺带挡掉协议相对地址（//evil.com/x.png）与任何绝对 URL。
+  if (trimmed.startsWith('//')) {
+    return false;
+  }
+  if (!trimmed.startsWith('/')) {
+    return false;
+  }
+  return trimmed.startsWith(AVATAR_ALLOWED_PREFIX);
+}

@@ -1,4 +1,10 @@
-import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsIn,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { BIO_MAX_LENGTH, PROFILE_VISIBILITIES } from '../user.constants';
 
@@ -16,11 +22,14 @@ export class UpdateUserProfileDto {
   @ApiPropertyOptional({ description: '昵称：1-50 个字符' })
   @IsOptional()
   @IsString()
+  // 不能为空串：早期版本只校验长度，传纯空格会落库成 ""（评审意见 D1）
+  @IsNotEmpty({ message: '昵称不能为空' })
   @MaxLength(50, { message: '昵称最长 50 个字符' })
   nickname?: string;
 
   @ApiPropertyOptional({
-    description: '头像地址（走统一文件上传接口拿到 URL 后回填）',
+    description:
+      '头像地址：只能是本站文件上传接口（/api/v1/files/...）返回的地址；留空表示用昵称首字母生成默认头像',
   })
   @IsOptional()
   @IsString()
