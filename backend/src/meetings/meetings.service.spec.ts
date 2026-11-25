@@ -378,12 +378,36 @@ describe('MeetingsService.status（由时间推导，不入库）', () => {
       'upcoming',
       '2026-11-24 00:00:00',
     ],
-    ['恰好开始', now, 'upcoming', '2026-11-24 00:00:00'],
+    ['恰好开始', now, 'ongoing', '2026-11-24 00:00:00'],
     [
       '开始后 1 毫秒',
       new Date(now.getTime() - 1),
-      'ended',
+      'ongoing',
       '2026-11-23 23:59:59',
+    ],
+    [
+      '开始后 119 分钟',
+      new Date(now.getTime() - 119 * 60_000),
+      'ongoing',
+      '2026-11-23 22:01:00',
+    ],
+    [
+      '默认时长结束前 1 毫秒',
+      new Date(now.getTime() - 120 * 60_000 + 1),
+      'ongoing',
+      '2026-11-23 22:00:00',
+    ],
+    [
+      '恰好开始后 120 分钟',
+      new Date(now.getTime() - 120 * 60_000),
+      'ended',
+      '2026-11-23 22:00:00',
+    ],
+    [
+      '开始后 121 分钟',
+      new Date(now.getTime() - 121 * 60_000),
+      'ended',
+      '2026-11-23 21:59:00',
     ],
     [
       '超过 48 小时仍是未来会议',
@@ -412,10 +436,11 @@ describe('MeetingsService.status（由时间推导，不入库）', () => {
     prisma.teamMember.findMany.mockResolvedValue([
       { userId: 1n, teamId: 7n } as { userId: bigint },
     ]);
-    prisma.meeting.count.mockResolvedValue(3);
+    prisma.meeting.count.mockResolvedValue(4);
     prisma.meeting.findMany.mockResolvedValue([
       buildMeeting({ heldAt: new Date(now.getTime() + 1000) }),
       buildMeeting({ heldAt: new Date(now.getTime() - 1000) }),
+      buildMeeting({ heldAt: new Date(now.getTime() - 121 * 60_000) }),
       buildMeeting({ heldAt: null }),
     ]);
 
@@ -423,6 +448,7 @@ describe('MeetingsService.status（由时间推导，不入库）', () => {
 
     expect(result.list.map((item) => item.status)).toEqual([
       'upcoming',
+      'ongoing',
       'ended',
       'unscheduled',
     ]);

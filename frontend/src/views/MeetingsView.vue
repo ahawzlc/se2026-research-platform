@@ -26,7 +26,11 @@ const currentProject = computed(() =>
 
 const filteredMeetings = computed(() => {
   if (activeTab.value === 'all') return meetings.value
-  const filtered = meetings.value.filter((item) => item.status === activeTab.value)
+  const filtered = meetings.value.filter((item) =>
+    activeTab.value === 'upcoming'
+      ? item.status === 'upcoming' || item.status === 'ongoing'
+      : item.status === 'ended'
+  )
   // 在分页前排序，让最近的一场会议始终出现在第一页。
   return activeTab.value === 'upcoming'
     ? filtered.sort((a, b) => a.heldAt.localeCompare(b.heldAt))
@@ -100,13 +104,17 @@ function dayMeetings(date: Date): MeetingItem[] {
 }
 
 function changeMonth(offset: number): void {
-  const next = new Date(calendarMonth.value)
-  next.setMonth(next.getMonth() + offset)
-  calendarMonth.value = next
+  // 固定为 1 日，避免 29–31 日翻入小月时溢出、跳月或卡住。
+  calendarMonth.value = new Date(
+    calendarMonth.value.getFullYear(),
+    calendarMonth.value.getMonth() + offset,
+    1
+  )
 }
 
 function statusLabel(status: MeetingItem['status']): string {
   if (status === 'upcoming') return '即将开始'
+  if (status === 'ongoing') return '进行中'
   if (status === 'ended') return '已结束'
   return '未安排时间'
 }
@@ -163,7 +171,10 @@ async function loadMeetings(): Promise<void> {
     }
 
     meetings.value = all
-    page.value = 1
+    page.value = Math.min(
+      page.value,
+      Math.max(1, Math.ceil(filteredMeetings.value.length / pageSize))
+    )
 
     if (!calendarDate.value) {
       calendarDate.value = dayKey(new Date())
@@ -250,7 +261,7 @@ async function handleSubmit(): Promise<void> {
         attendeeIds: form.attendeeIds
       })
 
-      ElMessage.success('会议已创建，参会人会在会前一小时收到提醒')
+      ElMessage.success('会议已创建；安排了开始时间的会议会在开始前一小时内提醒参会人')
     } else {
       await meetingsApi.updateMeeting(editingId.value, {
         title: form.title.trim(),
@@ -265,6 +276,8 @@ async function handleSubmit(): Promise<void> {
 
     dialogVisible.value = false
     await loadMeetings()
+  } catch {
+    // 请求失败由拦截器统一提示；保留表单供修改或重试。
   } finally {
     dialogLoading.value = false
   }
@@ -317,7 +330,8 @@ async function openMeetingFromQuery(): Promise<void> {
 }
 
 function handleDetailClosed(): void {
-  if (detailVisible.value || route.query.meetingId === undefined) return
+  // Element Plus 的 closed 先于 update:modelValue=false，不能依赖旧的可见值。
+  if (route.query.meetingId === undefined) return
   // 消费完深链接后清理参数，同一条提醒再次点击也能触发路由变化。
   const query = { ...route.query }
   delete query.meetingId
@@ -373,7 +387,7 @@ onMounted(async () => {
 
       <template v-else>
         <el-tabs v-model="activeTab" @tab-change="handleTabChange">
-          <el-tab-pane label="即将开始" name="upcoming" />
+          <el-tab-pane label="未结束" name="upcoming" />
           <el-tab-pane label="已结束" name="ended" />
           <el-tab-pane label="全部" name="all" />
         </el-tabs>
@@ -494,26 +508,43 @@ onMounted(async () => {
             format="YYYY-MM-DD HH:mm:ss"
             value-format="YYYY-MM-DD HH:mm:ss"
             class="full-width"
+            placeholder="选填，未填表示暂不安排时间"
           />
         </el-form-item>
 
         <el-form-item label="地点/链接" prop="location">
-          <el-input v-model="form.location" maxlength="200" placeholder="教室或线上会议链接" />
+          <el-input
+            v-model="form.location"
+            maxlength="200"
+            placeholder="选填，教室或线上会议链接"
+          />
         </el-form-item>
 
         <el-form-item label="参会人">
-          <el-select v-model="form.attendeeIds" multiple filterable class="full-width">
+          <el-select
+            v-model="form.attendeeIds"
+            multiple
+            filterable
+            class="full-width"
+            placeholder="选填，选择参会人"
+          >
             <el-option
               v-for="member in teamMembers"
               :key="member.userId"
-              :label="member.nickname || member.username"
+              :label="`${member.nickname || member.username}（@${member.username}）`"
               :value="member.userId"
             />
           </el-select>
         </el-form-item>
 
         <el-form-item label="会议记录">
-          <el-input v-model="form.content" type="textarea" :rows="4" maxlength="20000" />
+          <el-input
+            v-model="form.content"
+            type="textarea"
+            :rows="4"
+            maxlength="20000"
+            placeholder="选填，记录会议内容"
+          />
         </el-form-item>
       </el-form>
 

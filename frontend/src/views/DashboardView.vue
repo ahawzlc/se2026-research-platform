@@ -38,11 +38,27 @@ onMounted(async () => {
     // 汇总失败不影响工作台其余内容；提醒条不展示
   }
   try {
-    const result = await meetingsApi.fetchMeetings({ page: 1, size: 100 })
     const now = Date.now()
     const week = now + 7 * 24 * 60 * 60 * 1000
-    recentMeetings.value = result.list
-      .filter((meeting) => meeting.heldAt && new Date(meeting.heldAt.replace(' ', 'T') + '+08:00').getTime() >= now && new Date(meeting.heldAt.replace(' ', 'T') + '+08:00').getTime() <= week)
+    const all: MeetingItem[] = []
+    let page = 1
+    while (true) {
+      const result = await meetingsApi.fetchMeetings({ page, size: 100 })
+      all.push(...result.list)
+      const last = result.list[result.list.length - 1]
+      // 接口按开始时间倒序；过去/未安排时间之后不再有未来会议。
+      const lastStart = last?.heldAt
+        ? new Date(last.heldAt.replace(' ', 'T') + '+08:00').getTime()
+        : 0
+      if (result.list.length < 100 || all.length >= result.total || lastStart < now) break
+      page += 1
+    }
+    recentMeetings.value = all
+      .filter((meeting) => {
+        if (!meeting.heldAt) return false
+        const startsAt = new Date(meeting.heldAt.replace(' ', 'T') + '+08:00').getTime()
+        return startsAt >= now && startsAt <= week
+      })
       .sort((a, b) => a.heldAt.localeCompare(b.heldAt))
       .slice(0, 8)
   } catch {
@@ -155,7 +171,12 @@ const prerequisites = [
     />
 
     <el-card v-if="recentMeetings.length" shadow="never" class="recent-meetings">
-      <template #header><div class="recent-head"><span>未来 7 天会议</span><router-link to="/meetings">查看全部</router-link></div></template>
+      <template #header>
+        <div class="recent-head">
+          <span>未来 7 天会议</span>
+          <router-link to="/meetings">查看全部</router-link>
+        </div>
+      </template>
       <div v-for="meeting in recentMeetings" :key="meeting.id" class="recent-item">
         <router-link :to="`/meetings?meetingId=${meeting.id}`">{{ meeting.title }}</router-link>
         <span>{{ meeting.heldAt }} · {{ meeting.projectName }}</span>
@@ -244,10 +265,25 @@ const prerequisites = [
   color: #303133;
 }
 
-.recent-meetings { margin-top: 16px; }
-.recent-head { display: flex; justify-content: space-between; align-items: center; }
-.recent-item { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px dashed #ebeef5; font-size: 13px; }
-.recent-item span { color: #909399; }
+.recent-meetings {
+  margin-top: 16px;
+}
+.recent-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.recent-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px dashed #ebeef5;
+  font-size: 13px;
+}
+.recent-item span {
+  color: #909399;
+}
 
 .section-title:first-of-type {
   margin-top: 20px;

@@ -45,18 +45,26 @@ async function main() {
       return meeting;
     }
     const reminder = await create('55 分钟后：提醒直达详情验收', new Date(now.getTime() + 55 * 60_000));
-    for (let i = 1; i <= 11; i++) {
+    // F2_DEMO_LARGE=1 时额外造远期会议，验证工作台不会漏掉最近的会议。
+    const extraMeetings = process.env.F2_DEMO_LARGE === '1' ? 106 : 11;
+    for (let i = 1; i <= extraMeetings; i++) {
       await create(`未来会议 ${String(i).padStart(2, '0')}`, new Date(now.getTime() + (i + 1) * 3_600_000));
     }
-    await create('已结束会议', new Date(now.getTime() - 3_600_000));
+    await create('进行中会议（默认120分钟）', new Date(now.getTime() - 30 * 60_000));
+    await create('已结束会议', new Date(now.getTime() - 121 * 60_000));
     await create('未安排时间会议', null);
     const cross = await create('其他项目：提醒直达详情验收', new Date(now.getTime() + 60 * 60_000), other.id);
+    const temporary = await create('5分钟后临时会议', new Date(now.getTime() + 5 * 60_000), other.id);
+    const longTitle = await create('长'.repeat(190), new Date(now.getTime() + 10 * 60_000), other.id);
     await app.get(MeetingReminderService).runOnce(now);
-    const count = await prisma.notification.count({ where: { userId: owner.id, type: 'meeting_upcoming', refId: { in: [reminder.id, cross.id] }, deleted: 0 } });
+    const count = await prisma.notification.count({ where: { userId: owner.id, type: 'meeting_upcoming', refId: { in: [reminder.id, cross.id, temporary.id, longTitle.id] }, deleted: 0 } });
     console.log(JSON.stringify({
       username: owner.username, memberUsername: member.username, password,
       project: project.name,
       reminderNotificationsForOwner: count,
+      futureMeetingsInSortingProject: extraMeetings + 1,
+      expectedNotEndedInSortingProject: extraMeetings + 2,
+      nearestDashboardTitle: temporary.title,
       directUrl: `http://localhost:5173/meetings?meetingId=${reminder.id}`,
       otherProjectUrl: `http://localhost:5173/meetings?meetingId=${cross.id}`,
       note: '登录后依次验收铃铛、通知中心、工作台与直接链接；截图完成前保留测试容器。'

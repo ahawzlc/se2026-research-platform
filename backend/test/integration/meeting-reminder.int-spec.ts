@@ -5,6 +5,7 @@ import { App } from 'supertest/types';
 import request from 'supertest';
 import { PrismaService } from '../../src/prisma/prisma.service';
 import { MeetingReminderService } from '../../src/meetings/meeting-reminder.service';
+import { NotificationsService } from '../../src/notifications/notifications.service';
 import { formatDateTime } from '../../src/common/datetime';
 import {
   createIntegrationApp,
@@ -117,7 +118,7 @@ maybe('F-2 会议提醒真库集成', () => {
   }
 
   it('造一条 55 分钟后的会议，跑一轮 cron，所有参会人的通知真实落库；重复执行不再写入', async () => {
-    // 秒精度与 MySQL DATETIME(0) 一致。handleCron 使用真实当前时间，显式扫描用固定 now 验证闭区间下界。
+    // 秒精度与 MySQL DATETIME(0) 一致，保留卡面的 55 分钟会议验收。
     const now = new Date(Math.ceil(Date.now() / 1000) * 1000);
     const meeting = await createMeeting(new Date(now.getTime() + 55 * 60_000));
     const where = {
@@ -205,11 +206,11 @@ maybe('F-2 会议提醒真库集成', () => {
       data: { teamId: teamId!, name: 'F-2 已删项目', deleted: 1 },
     });
     projectIds.push(deletedProject.id);
-    const lower = await createMeeting(at(55 * 60));
-    const upper = await createMeeting(at(65 * 60), { removedBob: true });
+    const lower = await createMeeting(at(0));
+    const upper = await createMeeting(at(60 * 60), { removedBob: true });
     const excluded = [
-      await createMeeting(at(55 * 60 - 1)),
-      await createMeeting(at(65 * 60 + 1)),
+      await createMeeting(at(-1)),
+      await createMeeting(at(60 * 60 + 1)),
       await createMeeting(null),
       await createMeeting(at(60 * 60), { deleted: 1 }),
       await createMeeting(at(60 * 60), { projectId: deletedProject.id }),
@@ -246,5 +247,70 @@ maybe('F-2 会议提醒真库集成', () => {
         },
       }),
     ).toBe(0);
+  });
+
+  it('临时创建/改期进入一小时内、重启补扫及后来恢复的参会人均能补收提醒', async () => {
+    const now = new Date(Math.floor(Date.now() / 1000) * 1000);
+    const meeting = await createMeeting(new Date(now.getTime() + 90 * 60_000), {
+      removedBob: true,
+    });
+    const where = {
+      type: 'meeting_upcoming',
+      refType: 'meeting',
+      refId: meeting.id,
+      deleted: 0,
+    };
+    await reminder.runOnce(now);
+    expect(await prisma.notification.count({ where })).toBe(0);
+
+    // 改期到开始前 20 分钟；上轮已经结束，这次扫描可补上。
+    await prisma.meeting.update({
+      where: { id: meeting.id },
+      data: { heldAt: new Date(now.getTime() + 20 * 60_000) },
+    });
+    await reminder.runOnce(now);
+    expect(await prisma.notification.count({ where })).toBe(1);
+    await prisma.meetingAttendee.update({
+      where: {
+        meetingId_userId: { meetingId: meeting.id, userId: BigInt(bob.userId) },
+      },
+      data: { deleted: 0 },
+    });
+    // 新建服务对象模拟重启后一次扫描，继续使用真实 Prisma 与通知服务。
+    const restarted = new MeetingReminderService(
+      prisma,
+      app.get(NotificationsService),
+    );
+    await restarted.runOnce(now);
+    expect(await prisma.notification.count({ where })).toBe(2);
+    expect(
+      await prisma.notification.count({
+        where: { ...where, userId: BigInt(bob.userId) },
+      }),
+    ).toBe(1);
+    await restarted.runOnce(now);
+    expect(await prisma.notification.count({ where })).toBe(2);
+  });
+
+  it('190 字主题在真库中仍为每位参会人写入合法长度的提醒', async () => {
+    const now = new Date(Math.floor(Date.now() / 1000) * 1000);
+    const meeting = await createMeeting(new Date(now.getTime() + 10 * 60_000));
+    await prisma.meeting.update({
+      where: { id: meeting.id },
+      data: { title: '长'.repeat(190) },
+    });
+    await reminder.runOnce(now);
+    const rows = await prisma.notification.findMany({
+      where: {
+        type: 'meeting_upcoming',
+        refType: 'meeting',
+        refId: meeting.id,
+        deleted: 0,
+      },
+    });
+    expect(rows).toHaveLength(2);
+    expect(
+      rows.every((row) => row.title.length <= 200 && row.title.includes('…')),
+    ).toBe(true);
   });
 });

@@ -31,8 +31,8 @@ export interface MeetingItem {
   title: string;
   /** 北京时间 yyyy-MM-dd HH:mm:ss；未填时为空串 */
   heldAt: string;
-  /** upcoming / ended / unscheduled，由 heldAt 推导，不入库。 */
-  status: 'upcoming' | 'ended' | 'unscheduled';
+  /** 由开始时间和默认时长推导，不入库。 */
+  status: 'upcoming' | 'ongoing' | 'ended' | 'unscheduled';
   location: string;
   content: string;
   attendees: AttendeeItem[];
@@ -50,6 +50,9 @@ export interface PageData<T> {
 
 /** 参会人上限：组规模小，50 足够，防止一次请求塞爆 */
 const MAX_ATTENDEES = 50;
+
+/** 会议表没有结束时间，按默认 120 分钟估算；不代表真实结束或签到状态。 */
+const ONGOING_WINDOW_MINUTES = 120;
 
 /**
  * 会议服务（任务卡 C-2）。
@@ -438,17 +441,23 @@ export class MeetingsService {
       };
     }[];
   }): MeetingItem {
+    const now = Date.now();
+    const startsAt = row.heldAt?.getTime();
+    const status: MeetingItem['status'] =
+      startsAt === undefined
+        ? 'unscheduled'
+        : startsAt > now
+          ? 'upcoming'
+          : now < startsAt + ONGOING_WINDOW_MINUTES * 60_000
+            ? 'ongoing'
+            : 'ended';
     return {
       id: toIdString(row.id),
       projectId: toIdString(row.projectId),
       projectName: row.project.name,
       title: row.title,
       heldAt: formatDateTime(row.heldAt),
-      status: row.heldAt
-        ? row.heldAt.getTime() >= Date.now()
-          ? 'upcoming'
-          : 'ended'
-        : 'unscheduled',
+      status,
       location: row.location ?? '',
       content: row.content ?? '',
       attendees: row.attendees.map((a) => ({
