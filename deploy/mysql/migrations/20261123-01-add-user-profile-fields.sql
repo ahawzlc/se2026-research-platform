@@ -12,6 +12,7 @@
 #   带 `-f`（--force）重跑才是「报 4 个预期错误、无副作用」：
 #   3 条 ADD COLUMN 报 1060（列已存在）、1 条 ADD UNIQUE KEY 报 1061（索引已存在），
 #   其余语句继续执行完毕。
+#   （第二节之二的 MODIFY COLUMN avatar 是幂等的，不产生 1060/1061 错误。）
 #
 # 列顺序（评审意见 B2②）：
 #   ADD COLUMN 必须带 `AFTER <列名>`，否则新列排在表尾，
@@ -24,12 +25,20 @@
 #   早期版本用 CONCAT('U', LPAD(id,10,'0')) 回填，那等于让全部存量用户的
 #   UID 就等于自己的自增 id（id=12345 → U0000012345），照样可以枚举，
 #   与「引入 UID 就是为了不被枚举」的理由自相矛盾。
-#   改为：存量用户在**首次访问 GET /api/v1/users/me 时由应用层随机分配**
-#   （见 backend/src/users/users.service.ts 的 ensurePublicUid），
+#   改为：存量用户在**首次返回本人信息的接口时由应用层随机分配**
+#   （GET /api/v1/auth/me、GET /api/v1/users/me、登录、注册、改密；
+#   见 backend/src/users/users.service.ts 的 ensurePublicUid），
 #   分配时撞唯一索引就重试。
+#   `/auth/me` 也要分配：启动路径不走 `/users/me`，
+#   若只在后者分配，存量用户必须亲自点开「个人主页」才有 UID，
+#   在那之前别人既加不了他、也发不了私信（评审意见 R1）。
 #   这样也顺带解决了「迁移执行完、部署还没上线期间注册的用户没有 UID」的问题。
 #   注意：**不要**在 SQL 里用 RAND() 回填——随机值可能撞号，
 #   而 ADD UNIQUE KEY 会因重复值失败，导致整个迁移回滚。
+#
+# avatar 列注释（评审意见 R3）：
+#   第二节之二用 MODIFY COLUMN 把 avatar 的注释同步成 init SQL 的写法，
+#   使「升级出来的库」与「全新安装的库」的 SHOW CREATE TABLE 完全一致。
 #
 # 与 01-schema.sql 的 user 表定义逐字一致，改口径先改 docs/02 与 init SQL，再同步本文件；
 # 本次不新增外键，全库外键总数仍为 38（口径见 docs/02 外键约束一节）。
@@ -39,7 +48,7 @@
 # 第一节：加列（带 AFTER，保证列顺序与全新安装一致）
 # ------------------------------------------------------------------------------
 ALTER TABLE `user`
-  ADD COLUMN `public_uid` VARCHAR(20) NULL COMMENT '对外展示的 UID，创建后不可变，唯一；NULL 表示尚未分配（存量用户首次访问 /users/me 时由应用层随机分配）' AFTER `email`;
+  ADD COLUMN `public_uid` VARCHAR(20) NULL COMMENT '对外展示的 UID，创建后不可变，唯一；NULL 表示尚未分配（存量用户首次返回本人信息时由应用层随机分配）' AFTER `email`;
 
 ALTER TABLE `user`
   ADD COLUMN `bio` VARCHAR(500) NOT NULL DEFAULT '' COMMENT '个人简介' AFTER `public_uid`;
@@ -55,6 +64,19 @@ ALTER TABLE `user`
 # ------------------------------------------------------------------------------
 ALTER TABLE `user`
   ADD UNIQUE KEY `uk_user_public_uid` (`public_uid`);
+
+# ------------------------------------------------------------------------------
+# 第二节之二：同步 avatar 列注释（评审意见 R3）
+#   全新安装（01-schema.sql）的 avatar 注释是「头像地址，空表示用昵称首字母生成默认头像」，
+#   而升级出来的库还是旧的「头像地址」——两条路径的 SHOW CREATE TABLE 不一致。
+#   本语句只改注释，不动类型、默认值与数据。
+#
+#   MODIFY COLUMN 是幂等的：注释已经是目标值时重复执行不报错、不产生副作用，
+#   因此不带 -f 重跑到这一条也安全。
+# ------------------------------------------------------------------------------
+ALTER TABLE `user`
+  MODIFY COLUMN `avatar` VARCHAR(255) NOT NULL DEFAULT ''
+  COMMENT '头像地址，空表示用昵称首字母生成默认头像';
 
 # ------------------------------------------------------------------------------
 # 第三节：校验（逐条执行，期望值见注释）
