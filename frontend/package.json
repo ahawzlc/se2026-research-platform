@@ -6,6 +6,7 @@
   "description": "校园科研项目协作与成果管理平台 —— 前端",
   "scripts": {
     "dev": "vite",
+    "test": "node --test test/*.test.cjs",
     "typecheck": "vue-tsc --noEmit",
     "build": "vue-tsc --noEmit && vite build",
     "build:only": "vite build",

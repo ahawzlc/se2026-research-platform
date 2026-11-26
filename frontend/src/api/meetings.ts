@@ -23,6 +23,7 @@ export interface MeetingItem {
   title: string
   /** yyyy-MM-dd HH:mm:ss（北京时间），未设置为空字符串 */
   heldAt: string
+  status: 'upcoming' | 'ongoing' | 'ended' | 'unscheduled'
   location: string
   content: string
   attendees: MeetingAttendeeItem[]

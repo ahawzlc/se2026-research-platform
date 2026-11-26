@@ -87,7 +87,10 @@ instance.interceptors.response.use(
     } else if (status >= 500) {
       ElMessage.error('服务异常，请稍后重试')
     } else {
-      ElMessage.error(error?.message || '网络异常，请稍后重试')
+      // 400 / 409 等同样带统一返回体：优先展示后端给出的业务文案
+      // （如「还有 1 条待处理申请，请先处理后再删除」），没有返回体时才退回 axios 的默认提示
+      const msg = (error?.response?.data as ApiResult | undefined)?.message
+      ElMessage.error(msg || error?.message || '网络异常，请稍后重试')
     }
     return Promise.reject(error)
   }

@@ -5,7 +5,7 @@
  * 新增类型必须三处同步（docs/01 → docs/02 → 本文件），并知会调用方所在的线。
  */
 
-/** 通知类型（meeting_upcoming 为线④ F-2 会前提醒占位，Phase 2 启用） */
+/** 通知类型；meeting_upcoming 由线④ F-2 的 Cron 在会前一小时推送。 */
 export const NOTIFICATION_TYPES = [
   'team_apply',
   'team_apply_approved',

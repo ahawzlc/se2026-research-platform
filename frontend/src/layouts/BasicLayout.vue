@@ -56,8 +56,13 @@ async function loadRecent(): Promise<void> {
 }
 
 function refTarget(item: NotificationItem): string {
-  // 已知来源跳对应页面；community_post 待线②页面落地后接入
-  if (item.refType === 'meeting') return '/meetings'
+  // 已知来源跳对应页面；community_post 跳社区帖，friendship 跳好友页
+  if (item.refType === 'community_post') {
+    // 「有人申请加入」直达该帖的申请管理页签，其余社区通知进详情
+    const tab = item.type === 'team_apply' ? '?tab=applications' : ''
+    return `/community/${item.refId}${tab}`
+  }
+  if (item.refType === 'meeting') return `/meetings?meetingId=${encodeURIComponent(item.refId)}`
   if (item.refType === 'conversation') return '/messages'
   // 好友通知 → 好友页（线③ 卡 E-3）
   // 「申请」类落到「收到的申请」页签，「通过」类落到「好友」页签
@@ -87,6 +92,7 @@ function goAllNotifications(): void {
 
 const menuItems = [
   { path: '/dashboard', title: '工作台' },
+  { path: '/community', title: '组队广场' },
   { path: '/overview', title: '项目概览' },
   { path: '/projects', title: '项目管理' },
   { path: '/tasks', title: '任务看板' },
@@ -100,7 +106,10 @@ const menuItems = [
   { path: '/members', title: '课题组成员' }
 ]
 
-const activeMenu = computed(() => route.path)
+// 子页面（如 /community/12）让所属菜单项保持高亮
+const activeMenu = computed(
+  () => menuItems.find((item) => route.path.startsWith(`${item.path}/`))?.path ?? route.path
+)
 const pageTitle = computed(() => route.meta.title ?? '')
 const displayName = computed(() => userStore.userInfo?.nickname || '未登录')
 

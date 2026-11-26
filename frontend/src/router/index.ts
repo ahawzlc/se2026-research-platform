@@ -32,6 +32,18 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '工作台' }
       },
       {
+        path: 'community',
+        name: 'community',
+        component: () => import('@/views/CommunityView.vue'),
+        meta: { title: '组队广场', owner: '线②' }
+      },
+      {
+        path: 'community/:id',
+        name: 'community-post',
+        component: () => import('@/views/CommunityPostView.vue'),
+        meta: { title: '招募帖详情', owner: '线②' }
+      },
+      {
         path: 'overview',
         name: 'overview',
         component: () => import('@/views/OverviewView.vue'),

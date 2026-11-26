@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { Notification } from '@prisma/client';
+import type { Notification, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BizException } from '../common/result';
 import { formatDateTime, toIdString } from '../common/datetime';
@@ -52,6 +52,33 @@ export class NotificationsService {
 
   /** 服务端写入一条通知（唯一写入口） */
   async push(input: PushNotificationInput): Promise<NotificationItem> {
+    const created = await this.prisma.notification.create({
+      data: this.toCreateData(input),
+    });
+    return this.toItem(created);
+  }
+
+  /**
+   * 在调用方事务内写入一条通知（校验口径与 push 完全一致）。
+   *
+   * 供「业务写入必须与通知同成同败」的场景使用——如线② E-2 审批通过：
+   * 建组、入组、名额与通知在同一事务里，任一步失败整体回滚。
+   * 通知仍是「只经 NotificationsService 写入」，其他模块不要直写 notification 表。
+   */
+  async pushInTransaction(
+    tx: Prisma.TransactionClient,
+    input: PushNotificationInput,
+  ): Promise<NotificationItem> {
+    const created = await tx.notification.create({
+      data: this.toCreateData(input),
+    });
+    return this.toItem(created);
+  }
+
+  /** 校验入参并组装 notification 行（push 与 pushInTransaction 共用） */
+  private toCreateData(
+    input: PushNotificationInput,
+  ): Prisma.NotificationUncheckedCreateInput {
     const title = (input.title ?? '').trim();
     if (!title || title.length > NOTIFICATION_TITLE_MAX) {
       throw BizException.param(
@@ -67,22 +94,42 @@ export class NotificationsService {
       throw BizException.param('refType 与 refId 必须同时提供或同时缺省');
     }
 
-    const created = await this.prisma.notification.create({
-      data: {
-        userId: this.asId(input.toUserId, 'toUserId'),
+    return {
+      userId: this.asId(input.toUserId, 'toUserId'),
+      type: input.type,
+      title,
+      ...(hasRefType && input.refType !== undefined && input.refId !== undefined
+        ? {
+            refType: input.refType,
+            refId: this.asId(input.refId, 'refId'),
+          }
+        : {}),
+    };
+  }
+
+  /** 幂等推送：同一用户、类型、来源只保留一条未删除通知。 */
+  async pushOnce(
+    input: PushNotificationInput,
+  ): Promise<NotificationItem | null> {
+    const userId = this.asId(input.toUserId, 'toUserId');
+    const refId =
+      input.refId === undefined ? undefined : this.asId(input.refId, 'refId');
+    const existing = await this.prisma.notification.findFirst({
+      where: {
+        userId,
         type: input.type,
-        title,
-        ...(hasRefType &&
-        input.refType !== undefined &&
-        input.refId !== undefined
-          ? {
-              refType: input.refType,
-              refId: this.asId(input.refId, 'refId'),
-            }
-          : {}),
+        refType: input.refType,
+        refId,
+        deleted: 0,
       },
+      orderBy: { id: 'desc' },
     });
-    return this.toItem(created);
+    if (existing) return null;
+    return this.push({
+      ...input,
+      toUserId: userId,
+      ...(refId === undefined ? {} : { refId }),
+    });
   }
 
   /** 我的通知列表（按 id 倒序，可仅看未读） */

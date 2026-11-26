@@ -4,6 +4,7 @@
   "testEnvironment": "node",
   "testRegex": ".int-spec.ts$",
   "testTimeout": 30000,
+  "maxWorkers": 1,
   "transform": {
     "^.+\\.(t|j)s$": "ts-jest"
   }

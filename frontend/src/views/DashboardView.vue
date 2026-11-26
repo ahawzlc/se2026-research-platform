@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { meetingsApi } from '@/api'
+import type { MeetingItem } from '@/api/meetings'
 import { loadOverview } from '@/utils/overview'
 
 interface TaskItem {
@@ -25,6 +27,7 @@ const statusTagType: Record<ModuleCard['status'], 'success' | 'warning' | 'info'
 /** 逾期提醒（卡 C-补1）：进入工作台即汇总一次，有逾期则挂横幅导流到项目概览 */
 const overdueTasks = ref(0)
 const overdueMilestones = ref(0)
+const recentMeetings = ref<MeetingItem[]>([])
 
 onMounted(async () => {
   try {
@@ -33,6 +36,33 @@ onMounted(async () => {
     overdueMilestones.value = snapshot.overdueMilestones.length
   } catch {
     // 汇总失败不影响工作台其余内容；提醒条不展示
+  }
+  try {
+    const now = Date.now()
+    const week = now + 7 * 24 * 60 * 60 * 1000
+    const all: MeetingItem[] = []
+    let page = 1
+    while (true) {
+      const result = await meetingsApi.fetchMeetings({ page, size: 100 })
+      all.push(...result.list)
+      const last = result.list[result.list.length - 1]
+      // 接口按开始时间倒序；过去/未安排时间之后不再有未来会议。
+      const lastStart = last?.heldAt
+        ? new Date(last.heldAt.replace(' ', 'T') + '+08:00').getTime()
+        : 0
+      if (result.list.length < 100 || all.length >= result.total || lastStart < now) break
+      page += 1
+    }
+    recentMeetings.value = all
+      .filter((meeting) => {
+        if (!meeting.heldAt) return false
+        const startsAt = new Date(meeting.heldAt.replace(' ', 'T') + '+08:00').getTime()
+        return startsAt >= now && startsAt <= week
+      })
+      .sort((a, b) => a.heldAt.localeCompare(b.heldAt))
+      .slice(0, 8)
+  } catch {
+    recentMeetings.value = []
   }
 })
 
@@ -140,6 +170,19 @@ const prerequisites = [
       description="账号、项目任务（看板/甘特图/评论/概览/逾期提醒）、文献、会议、成果、协作消息、参与度画像、个人设置均已部署；剩余：权重校准待真实样本、答辩收尾（docs/07 检查单）。"
     />
 
+    <el-card v-if="recentMeetings.length" shadow="never" class="recent-meetings">
+      <template #header>
+        <div class="recent-head">
+          <span>未来 7 天会议</span>
+          <router-link to="/meetings">查看全部</router-link>
+        </div>
+      </template>
+      <div v-for="meeting in recentMeetings" :key="meeting.id" class="recent-item">
+        <router-link :to="`/meetings?meetingId=${meeting.id}`">{{ meeting.title }}</router-link>
+        <span>{{ meeting.heldAt }} · {{ meeting.projectName }}</span>
+      </div>
+    </el-card>
+
     <h2 class="section-title">模块进度</h2>
     <el-row :gutter="16">
       <el-col v-for="item in modules" :key="item.title" :xs="24" :sm="12" :lg="8">
@@ -220,6 +263,26 @@ const prerequisites = [
   font-size: 15px;
   font-weight: 500;
   color: #303133;
+}
+
+.recent-meetings {
+  margin-top: 16px;
+}
+.recent-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.recent-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px dashed #ebeef5;
+  font-size: 13px;
+}
+.recent-item span {
+  color: #909399;
 }
 
 .section-title:first-of-type {

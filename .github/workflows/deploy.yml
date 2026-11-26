@@ -68,6 +68,10 @@ jobs:
         working-directory: frontend
         run: npm run typecheck
 
+      - name: 前端 F-2 页面回归
+        working-directory: frontend
+        run: npm test
+
       - name: 前端 lint
         working-directory: frontend
         run: npm run lint
@@ -117,6 +121,14 @@ jobs:
       - name: 运行真库集成测试（认证链 + 通知中心）
         working-directory: backend
         run: npm run test:integration
+
+      # 只在测试失败时执行：把 InnoDB 状态（含最近一次死锁的完整等待环）打进日志。
+      # PR #46 的间歇性 P2034 当时只能靠反复重跑去碰，有了这一步可以直接读现场。
+      - name: 真库集成测试失败时导出 InnoDB 状态
+        if: failure()
+        run: |
+          mysql -h127.0.0.1 -uroot -e "SHOW ENGINE INNODB STATUS\G" \
+            || echo "::warning::未能导出 InnoDB 状态"
 
   deploy:
     name: 部署到组服务器

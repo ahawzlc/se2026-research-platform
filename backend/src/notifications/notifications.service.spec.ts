@@ -1,9 +1,14 @@
+import type { Prisma } from '@prisma/client';
 import {
   NotificationsService,
   type PushNotificationInput,
 } from './notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ErrorCode } from '../common/result';
+
+/** 单测里的 tx 只是 notification 表的替身，传给 service 时按 Prisma 事务客户端看待 */
+const asTx = (tx: unknown): Prisma.TransactionClient =>
+  tx as Prisma.TransactionClient;
 
 /** notification 表一行快照 */
 function buildNotification(overrides: Record<string, unknown> = {}) {
@@ -141,6 +146,148 @@ describe('NotificationsService.push（冻结接口）', () => {
       ErrorCode.PARAM_INVALID,
       'toUserId 需为合法 id',
     );
+  });
+});
+
+describe('NotificationsService.pushOnce（F-2 顺序扫描去重）', () => {
+  const input: PushNotificationInput = {
+    toUserId: '1',
+    type: 'meeting_upcoming',
+    title: '会议《周会》将于 14:00 开始',
+    refType: 'meeting',
+    refId: '5',
+  };
+
+  it('无重复时走冻结的 push 写入口，字符串 id 转为 bigint', async () => {
+    const { service, prisma } = createService();
+    prisma.notification.findFirst.mockResolvedValue(null);
+    prisma.notification.create.mockResolvedValue(
+      buildNotification({ type: 'meeting_upcoming', refType: 'meeting' }),
+    );
+
+    await expect(service.pushOnce(input)).resolves.toMatchObject({
+      id: '11',
+      refId: '5',
+    });
+
+    expect(prisma.notification.findFirst).toHaveBeenCalledWith({
+      where: {
+        userId: 1n,
+        type: 'meeting_upcoming',
+        refType: 'meeting',
+        refId: 5n,
+        deleted: 0,
+      },
+      orderBy: { id: 'desc' },
+    });
+    expect(prisma.notification.create).toHaveBeenCalledTimes(1);
+    expect(prisma.notification.create).toHaveBeenCalledWith({
+      data: {
+        userId: 1n,
+        type: 'meeting_upcoming',
+        title: input.title,
+        refType: 'meeting',
+        refId: 5n,
+      },
+    });
+  });
+
+  it.each([0, 1])('已有同人同会通知（isRead=%i）不再写入', async (isRead) => {
+    const { service, prisma } = createService();
+    prisma.notification.findFirst.mockResolvedValue(
+      buildNotification({ isRead }),
+    );
+
+    await expect(service.pushOnce(input)).resolves.toBeNull();
+    expect(prisma.notification.create).not.toHaveBeenCalled();
+    expect(prisma.notification.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          userId: 1n,
+          type: 'meeting_upcoming',
+          refType: 'meeting',
+          refId: 5n,
+          deleted: 0,
+        },
+      }),
+    );
+  });
+
+  it('bigint 入参不丢精度，其他参会人与会议使用各自的去重范围', async () => {
+    const { service, prisma } = createService();
+    prisma.notification.findFirst.mockResolvedValue(null);
+    prisma.notification.create.mockResolvedValue(buildNotification());
+
+    await service.pushOnce({
+      ...input,
+      toUserId: 9007199254740993n,
+      refId: 9007199254740995n,
+    });
+
+    expect(prisma.notification.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          userId: 9007199254740993n,
+          type: 'meeting_upcoming',
+          refType: 'meeting',
+          refId: 9007199254740995n,
+          deleted: 0,
+        },
+      }),
+    );
+  });
+
+  it('数据库写入失败向上传递，不把失败当成重复', async () => {
+    const { service, prisma } = createService();
+    prisma.notification.findFirst.mockResolvedValue(null);
+    prisma.notification.create.mockRejectedValue(new Error('数据库不可用'));
+
+    await expect(service.pushOnce(input)).rejects.toThrow('数据库不可用');
+  });
+});
+
+describe('NotificationsService.pushInTransaction（卡 E-2 接缝）', () => {
+  it('在调用方事务内写入，校验与写入口径和 push 一致', async () => {
+    const { service, prisma } = createService();
+    const tx = { notification: { create: jest.fn() } };
+    tx.notification.create.mockResolvedValue(buildNotification());
+
+    const item = await service.pushInTransaction(asTx(tx), {
+      toUserId: '1',
+      type: 'team_apply_approved',
+      title: '爱丽丝 通过了你加入《互联网+项目》的申请',
+      refType: 'community_post',
+      refId: '5',
+    });
+
+    // 写入走的是调用方的事务客户端，不走 prisma（否则不在同一事务里）
+    expect(tx.notification.create).toHaveBeenCalledWith({
+      data: {
+        userId: 1n,
+        type: 'team_apply_approved',
+        title: '爱丽丝 通过了你加入《互联网+项目》的申请',
+        refType: 'community_post',
+        refId: 5n,
+      },
+    });
+    expect(prisma.notification.create).not.toHaveBeenCalled();
+    expect(item).toMatchObject({ id: '11', isRead: 0, refId: '5' });
+  });
+
+  it('非法入参在写库前被拦下', async () => {
+    const { service } = createService();
+    const tx = { notification: { create: jest.fn() } };
+
+    await expectBizError(
+      service.pushInTransaction(asTx(tx), {
+        toUserId: '1',
+        type: 'unknown_type' as PushNotificationInput['type'],
+        title: '标题',
+      }),
+      ErrorCode.PARAM_INVALID,
+      '未知通知类型：unknown_type',
+    );
+    expect(tx.notification.create).not.toHaveBeenCalled();
   });
 });
 

@@ -9,6 +9,13 @@
  *   - 本地：自备 MySQL（docker 或服务器隔离库），设 `RUN_INTEGRATION=1` 与
  *     `DATABASE_URL=mysql://...` 后 `cd backend && npm run test:integration`；
  *   - 未设 RUN_INTEGRATION 时整组跳过，不影响 `npm test` / `npm run test:e2e`。
+ *
+ * 并发约定：各套件【串行】执行（jest-integration.json 的 maxWorkers: 1），不要改回并行。
+ *   套件共用同一个库，收尾时按用户名前缀物理删除测试用户。InnoDB 删除父行（user）时会逐张检查
+ *   子表外键，在子表索引上留下间隙锁，并给排在前缀后面的那一条 user 行上锁；若此时另一个套件里
+ *   有事务正在往子表插入（如组队审批写 team_member / notification，其外键检查恰好持有这条 user 行的
+ *   共享锁），两者互等成环，InnoDB 回滚其中一个——表现为接口 500、Prisma P2034。
+ *   成环需要「物理删父行」与「插入子表」并发，串行后套件之间不再重叠。
  */
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
