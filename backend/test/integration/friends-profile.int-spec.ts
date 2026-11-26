@@ -193,6 +193,47 @@ maybe('个人主页与好友链真库集成（线③ 卡 E-3）', () => {
       .expect(404);
   });
 
+  /**
+   * 存量用户的 UID 在 /auth/me 补分配（评审意见 R1）。
+   *
+   * 早期实现只在 /users/me 分配，导致存量用户必须亲自点开「个人主页」
+   * 才有 UID；启动路径走 /auth/me，不分配的话上线即不可用
+   * （别人加不了他、也发不了私信）。
+   */
+  it('public_uid 为 NULL 的存量用户：调过 /auth/me 后 UID 非空，别人能按 UID 找到他', async () => {
+    // 把 Carol 的 public_uid 置空，模拟迁移后的存量用户
+    const carolRow = await prisma.user.findFirst({
+      where: { username: CAROL },
+      select: { id: true },
+    });
+    expect(carolRow).toBeTruthy();
+    await prisma.user.update({
+      where: { id: carolRow!.id },
+      data: { publicUid: null },
+    });
+
+    // 调 /auth/me → 应触发懒分配
+    const me = await request(app.getHttpServer())
+      .get('/api/v1/auth/me')
+      .set('Authorization', `Bearer ${carol.token}`)
+      .expect(200);
+    const meBody = envelope<ProfileBody>(me).data;
+    expect(meBody?.publicUid).toMatch(/^U\d{10}$/);
+
+    // 真库校验：UID 已落库，不再是 NULL
+    const row = await prisma.user.findFirst({
+      where: { username: CAROL },
+      select: { publicUid: true },
+    });
+    expect(row?.publicUid).toBeTruthy();
+
+    // 别人能按 UID 找到他（之前因 UID 为空而做不到）
+    await request(app.getHttpServer())
+      .get(`/api/v1/users/by-uid?uid=${meBody!.publicUid}`)
+      .set('Authorization', `Bearer ${alice.token}`)
+      .expect(200);
+  });
+
   // ---------------------------------------------------------------- 资料
 
   it('更新资料：昵称/简介/可见范围生效，UID 不可改', async () => {
@@ -775,7 +816,7 @@ maybe('个人主页与好友链真库集成（线③ 卡 E-3）', () => {
   /**
    * 撤回申请（评审意见 E4）：只有申请方本人能撤回，且仅限 pending。
    */
-  it('撤回申请：pending → rejected，且只有申请方能撤回', async () => {
+  it('撤回申请：逻辑删除该行、不进冷却期，且只有申请方能撤回', async () => {
     // 用 Bob（此时与 Alice 非好友，且前面的用例已把 Alice→Bob 清理干净）
     const bobUid = await uidOf(bob.token);
 
@@ -796,17 +837,22 @@ maybe('个人主页与好友链真库集成（线③ 卡 E-3）', () => {
       .set('Authorization', `Bearer ${alice.token}`)
       .expect(200);
 
-    // 真库校验：状态变 rejected
+    // 真库校验：逻辑删除（deleted=1），状态仍是 pending（不转 rejected）
     const row = await prisma.friendship.findFirst({
       where: { id: BigInt(requestId) },
     });
-    expect(row?.status).toBe('rejected');
+    expect(row?.deleted).toBe(1);
+    expect(row?.status).toBe('pending');
 
-    // 已处理的申请不能再撤回 → 409
+    // 撤回不进冷却期：撤回后马上能重新申请（评审意见 R2）
+    const reRequestId = await requestFriend(alice.token, bobUid);
+    expect(reRequestId).toBeTruthy();
+
+    // 清理：把这条 pending 也撤掉，避免影响后面的用例
     await request(app.getHttpServer())
-      .delete(`/api/v1/friends/requests/${requestId}`)
+      .delete(`/api/v1/friends/requests/${reRequestId}`)
       .set('Authorization', `Bearer ${alice.token}`)
-      .expect(409);
+      .expect(200);
   });
 
   /**

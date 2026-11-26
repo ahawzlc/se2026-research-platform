@@ -35,8 +35,11 @@ function createService() {
   const jwt = { signAsync: jest.fn().mockResolvedValue('token-abc') };
   const config = { get: jest.fn().mockReturnValue('604800') };
   // 注册时要分配对外 UID（线③ 卡 E-3）
+  // ensurePublicUid：存量用户走 /auth/me、登录、注册时补分配 UID（评审意见 R1）
   const users = {
     allocatePublicUid: jest.fn().mockResolvedValue('U0000000001'),
+    // ensurePublicUid 返回该用户当前的 UID（评审意见 R1）
+    ensurePublicUid: jest.fn().mockResolvedValue('U0000000001'),
   };
   const service = new AuthService(
     jwt as unknown as JwtService,
@@ -189,6 +192,24 @@ describe('AuthService.me', () => {
     expect(profile.id).toBe('1');
     expect(profile.createdAt).toBe('2026-10-29 10:00:00');
     expect(profile).not.toHaveProperty('passwordHash');
+  });
+
+  /**
+   * 存量用户的 UID 在 /auth/me 补分配（评审意见 R1）。
+   *
+   * 早期实现只在 /users/me 分配，导致存量用户必须亲自点开「个人主页」
+   * 才有 UID，在那之前别人加不了他、也发不了私信。
+   * 启动路径走的是 /auth/me，所以这里必须调 ensurePublicUid。
+   */
+  it('调用 /auth/me 时会补分配 UID 并返回它', async () => {
+    const { service, prisma, users } = createService();
+    prisma.user.findFirst.mockResolvedValue(buildUser());
+    users.ensurePublicUid.mockResolvedValue('U0000000123');
+
+    const profile = await service.me('1');
+
+    expect(users.ensurePublicUid).toHaveBeenCalledWith(1n);
+    expect(profile.publicUid).toBe('U0000000123');
   });
 });
 

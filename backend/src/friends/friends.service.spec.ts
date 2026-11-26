@@ -516,12 +516,77 @@ describe('FriendsService.createRequest', () => {
   });
 
   /**
+   * 被拒冷却期的天数提示（评审意见 R2）：
+   * `handled_at` 落库时按秒四舍五入，可能比当前时间还晚不到 1 秒，
+   * `elapsed` 成了负数，向上取整就会多算一天（提示 4 天而不是 3 天）。
+   * 这里把 handledAt 设成「未来 0.5 秒」来复现，提示必须是 3 天。
+   */
+  it('被拒时间因秒级舍入略晚于当前时间 → 提示仍是 3 天而不是 4 天', async () => {
+    const { service, prisma } = createService();
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
+    // handledAt 比「现在」晚 500 毫秒 —— 模拟 MySQL 8 的秒级四舍五入
+    prisma.friendship.findFirst.mockImplementation(
+      (args: { where: Record<string, unknown> }) =>
+        Promise.resolve(
+          args.where.status === 'accepted'
+            ? null
+            : buildFriendship({
+                status: 'rejected',
+                requesterId: 1n,
+                addresseeId: 2n,
+                handledAt: new Date(Date.now() + 500),
+              }),
+        ),
+    );
+
+    await expectBizError(
+      service.createRequest('1', { uid: 'U0000000002' }),
+      409,
+      '对方刚刚拒绝过你的好友申请，3 天内不能再发起申请',
+    );
+  });
+
+  /**
+   * 撤回不进冷却期（评审意见 R2，牵头人 2026-11-25 定）：
+   * 撤回是申请方主动撤的，对方并未拒绝，撤回后应能立即重新申请。
+   */
+  it('撤回过的关系行不算「被拒」→ 不触发冷却期', async () => {
+    const { service, prisma } = createService();
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
+    // 撤回后该行是 deleted=1 + status=pending，
+    // 冷却期查询（where.status === 'rejected'）不应命中它
+    prisma.friendship.findFirst.mockImplementation(
+      (args: { where: Record<string, unknown> }) =>
+        Promise.resolve(
+          args.where.status === 'accepted'
+            ? null
+            : args.where.status === 'rejected'
+              ? null // 没有「被拒」的行 → 不进冷却期
+              : buildFriendship({
+                  status: 'pending',
+                  requesterId: 1n,
+                  addresseeId: 2n,
+                  deleted: 1,
+                }),
+        ),
+    );
+    stubFriendshipLookup(prisma, {});
+    prisma.friendship.create.mockResolvedValue({ id: 50n });
+
+    await service.createRequest('1', { uid: 'U0000000002' });
+
+    expect(prisma.friendship.create).toHaveBeenCalled();
+  });
+
+  /**
    * 防骚扰 2（评审意见 D3）：每人每天的申请次数上限。
    */
   it('超出每日申请上限 → 400 并说明上限', async () => {
     const { service, prisma, rateLimit } = createService();
     stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
     prisma.friendship.findFirst.mockResolvedValue(null);
+    // 无历史关系行（计数在查重之后，需要先走到限流那一步）
+    stubFriendshipLookup(prisma, {});
     rateLimit.hit.mockReturnValue(false);
 
     await expectBizError(
@@ -530,6 +595,31 @@ describe('FriendsService.createRequest', () => {
       '今日好友申请次数已达上限（20 次），请明天再试',
     );
     expect(prisma.friendship.create).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 计数时机（评审建议项）：
+   * 对同一个等待中的人反复点「申请」，每次 409 都不该扣当天的额度——
+   * 否则 18 次重复申请就把 20 次额度用光，正常用户反而申请不了新好友。
+   */
+  it('重复申请（已有 pending）→ 409 且不消耗每日额度', async () => {
+    const { service, prisma, rateLimit } = createService();
+    stubUserLookup(prisma, { peer: buildUser(), me: buildMe() });
+    prisma.friendship.findFirst.mockResolvedValue(null);
+    stubFriendshipLookup(prisma, {
+      rows: [
+        buildFriendship({ status: 'pending', requesterId: 1n, addresseeId: 2n }),
+      ],
+    });
+    rateLimit.hit.mockReturnValue(true);
+
+    await expectBizError(
+      service.createRequest('1', { uid: 'U0000000002' }),
+      409,
+      '好友申请已发出，等待对方处理',
+    );
+    // 关键断言：限流没有被触发
+    expect(rateLimit.hit).not.toHaveBeenCalled();
   });
 
   it('限流按「发起人」维度计数', async () => {
@@ -661,7 +751,7 @@ describe('FriendsService.rejectRequest', () => {
 });
 
 describe('FriendsService.withdrawRequest', () => {
-  it('撤回：pending 改成 rejected，不发通知', async () => {
+  it('撤回：逻辑删除该行，不发通知（评审意见 R2：撤回不进冷却期）', async () => {
     const { service, prisma, notifications } = createService();
     prisma.friendship.findFirst.mockResolvedValue(
       buildFriendship({ status: 'pending', requesterId: 1n, addresseeId: 2n }),
@@ -671,9 +761,13 @@ describe('FriendsService.withdrawRequest', () => {
     await service.withdrawRequest('1', '50');
 
     const updateCalls = prisma.friendship.update.mock.calls as unknown as Array<
-      [{ data: { status: string; handledAt: Date } }]
+      [{ data: { deleted: number; status?: string; handledAt?: Date } }]
     >;
-    expect(updateCalls[0][0].data.status).toBe('rejected');
+    // 撤回是逻辑删除：deleted 置 1，状态保持 pending（不转 rejected）
+    expect(updateCalls[0][0].data.deleted).toBe(1);
+    // 不转 rejected —— 否则会被「被拒冷却期」误判为对方拒绝过
+    expect(updateCalls[0][0].data.status).toBeUndefined();
+    expect(updateCalls[0][0].data.handledAt).toBeUndefined();
     expect(notifications.push).not.toHaveBeenCalled();
   });
 
