@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { meetingsApi } from '@/api'
+import { computed, onMounted, ref } from 'vue'
+import { authApi, meetingsApi } from '@/api'
 import type { MeetingItem } from '@/api/meetings'
+import type { TaskItem as ApiTaskItem } from '@/api/tasks'
 import { loadOverview } from '@/utils/overview'
+import { useUserStore } from '@/store/user'
+import router from '@/router'
 
 interface TaskItem {
   name: string
@@ -28,12 +31,58 @@ const statusTagType: Record<ModuleCard['status'], 'success' | 'warning' | 'info'
 const overdueTasks = ref(0)
 const overdueMilestones = ref(0)
 const recentMeetings = ref<MeetingItem[]>([])
+const myTasks = ref<ApiTaskItem[]>([])
+const todoFilter = ref<'all' | 'overdue' | 'week'>('all')
+const userStore = useUserStore()
+
+function localDate(date = new Date()): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
+    date.getDate()
+  ).padStart(2, '0')}`
+}
+
+function weekEnd(): string {
+  const date = new Date()
+  const daysUntilSunday = date.getDay() === 0 ? 0 : 7 - date.getDay()
+  date.setDate(date.getDate() + daysUntilSunday)
+  return localDate(date)
+}
+
+const filteredMyTasks = computed(() => {
+  const today = localDate()
+  const end = weekEnd()
+  return [...myTasks.value]
+    .filter((task) => {
+      if (todoFilter.value === 'overdue') return !!task.dueDate && task.dueDate < today
+      if (todoFilter.value === 'week') return !!task.dueDate && task.dueDate >= today && task.dueDate <= end
+      return true
+    })
+    .sort((a, b) => {
+      if (!a.dueDate && !b.dueDate) return a.title.localeCompare(b.title)
+      if (!a.dueDate) return 1
+      if (!b.dueDate) return -1
+      return a.dueDate.localeCompare(b.dueDate) || a.title.localeCompare(b.title)
+    })
+})
+
+function isOverdue(task: ApiTaskItem): boolean {
+  return !!task.dueDate && task.dueDate < localDate()
+}
+
+function openTaskBoard(task: ApiTaskItem): void {
+  void router.push({ path: '/tasks', query: { projectId: task.projectId } })
+}
 
 onMounted(async () => {
   try {
-    const snapshot = await loadOverview()
+    if (!userStore.userInfo) {
+      const info = await authApi.fetchMe()
+      userStore.setUserInfo(info)
+    }
+    const snapshot = await loadOverview(userStore.userInfo?.id)
     overdueTasks.value = snapshot.overdueTasks.length
     overdueMilestones.value = snapshot.overdueMilestones.length
+    myTasks.value = snapshot.myTasks ?? []
   } catch {
     // 汇总失败不影响工作台其余内容；提醒条不展示
   }
@@ -183,6 +232,35 @@ const prerequisites = [
       </div>
     </el-card>
 
+    <el-card shadow="never" class="my-todos">
+      <template #header>
+        <div class="todo-head">
+          <span>我的待办</span>
+          <el-radio-group v-model="todoFilter" size="small">
+            <el-radio-button label="all">全部</el-radio-button>
+            <el-radio-button label="overdue">我逾期的</el-radio-button>
+            <el-radio-button label="week">本周到期</el-radio-button>
+          </el-radio-group>
+        </div>
+      </template>
+
+      <el-empty v-if="filteredMyTasks.length === 0" description="当前筛选下没有待办任务" :image-size="60" />
+      <button
+        v-for="task in filteredMyTasks"
+        :key="task.id"
+        type="button"
+        class="todo-item"
+        @click="openTaskBoard(task)"
+      >
+        <span class="todo-title">{{ task.title }}</span>
+        <span class="todo-project">{{ task.projectName }}</span>
+        <span v-if="task.dueDate" class="todo-due" :class="{ 'is-overdue': isOverdue(task) }">
+          {{ isOverdue(task) ? '已逾期 ' : '' }}{{ task.dueDate }}
+        </span>
+        <span v-else class="todo-due">未设置截止日期</span>
+      </button>
+    </el-card>
+
     <h2 class="section-title">模块进度</h2>
     <el-row :gutter="16">
       <el-col v-for="item in modules" :key="item.title" :xs="24" :sm="12" :lg="8">
@@ -283,6 +361,76 @@ const prerequisites = [
 }
 .recent-item span {
   color: #909399;
+}
+
+.my-todos {
+  margin-top: 16px;
+}
+
+.todo-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.todo-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 180px 150px;
+  align-items: center;
+  width: 100%;
+  padding: 10px 4px;
+  border: 0;
+  border-bottom: 1px dashed #ebeef5;
+  background: transparent;
+  color: #303133;
+  text-align: left;
+  cursor: pointer;
+}
+
+.todo-item:hover {
+  background: #f5f7fa;
+}
+
+.todo-title {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.todo-project,
+.todo-due {
+  overflow: hidden;
+  color: #909399;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.todo-due {
+  text-align: right;
+}
+
+.todo-due.is-overdue {
+  color: #f56c6c;
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .todo-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .todo-item {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .todo-due {
+    text-align: left;
+  }
 }
 
 .section-title:first-of-type {

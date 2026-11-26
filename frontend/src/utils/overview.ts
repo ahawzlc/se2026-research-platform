@@ -50,20 +50,34 @@ export interface OverviewSnapshot {
   overdueMilestones: MilestoneWithContext[]
   /** 临期（3 天内）未完成任务 */
   dueSoonTasks: TaskItem[]
+  /** 当前用户被指派且未完成的任务（F-3） */
+  myTasks: TaskItem[]
 }
 
-export async function loadOverview(): Promise<OverviewSnapshot> {
+async function fetchAllProjectTasks(projectId: string): Promise<TaskItem[]> {
+  const all: TaskItem[] = []
+  let page = 1
+  while (true) {
+    const result = await tasksApi.fetchTasks({ projectId, page, size: 100 })
+    all.push(...result.list)
+    if (result.list.length < 100 || all.length >= result.total) break
+    page += 1
+  }
+  return all
+}
+
+export async function loadOverview(userId?: string): Promise<OverviewSnapshot> {
   const projectResult = await projectsApi.fetchProjects({ page: 1, size: 100 })
   const projects = projectResult.list
 
   const perProject = await Promise.all(
     projects.map(async (project) => {
       const [tasksRes, milestones] = await Promise.all([
-        tasksApi.fetchTasks({ projectId: project.id, page: 1, size: 100 }),
+        fetchAllProjectTasks(project.id),
         projectsApi.fetchMilestones(project.id)
       ])
       return {
-        tasks: tasksRes.list as TaskItem[],
+        tasks: tasksRes,
         milestones: milestones.map((m) => ({ ...m, projectName: project.name }))
       }
     })
@@ -72,6 +86,9 @@ export async function loadOverview(): Promise<OverviewSnapshot> {
   const allTasks = perProject.flatMap((p) => p.tasks)
   const allMilestones = perProject.flatMap((p) => p.milestones)
   const activeTasks = allTasks.filter((t) => t.status !== 'done')
+  const myTasks = userId
+    ? activeTasks.filter((task) => task.assigneeId === userId)
+    : []
 
   return {
     projects,
@@ -80,6 +97,7 @@ export async function loadOverview(): Promise<OverviewSnapshot> {
     overdueMilestones: allMilestones
       .filter(isMilestoneOverdue)
       .sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
-    dueSoonTasks: activeTasks.filter(isTaskDueSoon).sort((a, b) => a.dueDate.localeCompare(b.dueDate))
+    dueSoonTasks: activeTasks.filter(isTaskDueSoon).sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
+    myTasks
   }
 }

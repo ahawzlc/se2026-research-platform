@@ -23,6 +23,8 @@ function meeting(id, hours) {
 
 function mount(rows, options = {}) {
   let mounted
+  const user = { userInfo: vue.ref(options.userInfo ?? { id: 'u1' }), setUserInfo(info) { this.userInfo.value = info } }
+  const router = { push: mock.fn(async () => {}) }
   const fetchMeetings = mock.fn(
     options.fetchMeetings ??
       (async ({ page, size }) => ({
@@ -44,16 +46,27 @@ function mount(rows, options = {}) {
               mounted = callback
             }
           }
-        if (name === '@/api') return { meetingsApi: { fetchMeetings } }
+        if (name === '@/api') return {
+          meetingsApi: { fetchMeetings },
+          authApi: { fetchMe: async () => ({ id: 'u1', username: 'u1', nickname: '用户', email: '' }) }
+        }
+        if (name === '@/store/user') return { useUserStore: () => user }
+        if (name === '@/router') return { __esModule: true, default: router }
         if (name === '@/utils/overview')
-          return { loadOverview: async () => ({ overdueTasks: [], overdueMilestones: [] }) }
+          return {
+            loadOverview: async () => ({
+              overdueTasks: [],
+              overdueMilestones: [],
+              myTasks: options.myTasks ?? []
+            })
+          }
         throw new Error(`未声明的测试依赖：${name}`)
       }
     },
     { filename }
   )
   const state = scope.run(() => exports.default.setup({}, { expose() {} }))
-  return { state, fetchMeetings, start: () => mounted(), stop: () => scope.stop() }
+  return { state, fetchMeetings, router, start: () => mounted(), stop: () => scope.stop() }
 }
 
 test('107场未来会议按接口倒序返回，工作台仍展示最近8场', async (t) => {
@@ -100,4 +113,59 @@ test('会议请求失败保留工作台其他内容，会议卡为空', async (t
   await app.start()
   assert.equal(app.state.recentMeetings.value.length, 0)
   assert.equal(app.state.overdueTasks.value, 0)
+})
+
+function task(id, overrides = {}) {
+  return {
+    id,
+    projectId: `p-${id}`,
+    projectName: `项目 ${id}`,
+    title: `任务 ${id}`,
+    assigneeId: 'u1',
+    status: 'todo',
+    priority: 'medium',
+    dueDate: '',
+    ...overrides
+  }
+}
+
+test('F-3 只展示当前用户未完成且已指派的跨项目任务', async (t) => {
+  const app = mount([], {
+    myTasks: [
+      task('overdue', { dueDate: '2026-11-20' }),
+      task('open', { dueDate: '2026-11-30' })
+    ]
+  })
+  t.after(app.stop)
+  await app.start()
+  assert.deepEqual(Array.from(app.state.myTasks.value, (item) => item.id), ['overdue', 'open'])
+  assert.deepEqual(Array.from(app.state.filteredMyTasks.value, (item) => item.id), ['overdue', 'open'])
+})
+
+test('F-3 筛选逾期和本周到期，按截止日期升序且无日期置底', async (t) => {
+  const app = mount([], {
+    myTasks: [
+      task('later', { dueDate: '2099-12-31' }),
+      task('none'),
+      task('soon', { dueDate: '2026-11-26' }),
+      task('old', { dueDate: '2020-01-01' })
+    ]
+  })
+  t.after(app.stop)
+  await app.start()
+  assert.deepEqual(Array.from(app.state.filteredMyTasks.value, (item) => item.id), ['old', 'soon', 'later', 'none'])
+  app.state.todoFilter.value = 'overdue'
+  assert.deepEqual(Array.from(app.state.filteredMyTasks.value, (item) => item.id), ['old'])
+  app.state.todoFilter.value = 'week'
+  assert.deepEqual(Array.from(app.state.filteredMyTasks.value, (item) => item.id), ['soon'])
+})
+
+test('F-3 点击待办跳转到对应项目看板', async (t) => {
+  const app = mount([], { myTasks: [task('1', { projectId: 'project-7' })] })
+  t.after(app.stop)
+  await app.start()
+  app.state.openTaskBoard(app.state.myTasks.value[0])
+  const target = app.router.push.mock.calls[0].arguments[0]
+  assert.equal(target.path, '/tasks')
+  assert.equal(target.query.projectId, 'project-7')
 })
