@@ -23,6 +23,14 @@ instance.interceptors.request.use((config) => {
 
 let redirecting = false
 
+/** 非 2xx 响应的返回体是统一结构时，取出后端给出的业务文案；不是统一结构（如网关的 HTML）时返回空 */
+function backendMessage(error: unknown): string | undefined {
+  const data = (error as { response?: { data?: ApiResult } } | null)?.response?.data
+  return data && typeof data === 'object' && typeof data.message === 'string'
+    ? data.message
+    : undefined
+}
+
 /**
  * 业务型 401（登录密码错 / 改密旧密码错，卡 A-补2）：按 docs/01 与登录惯例返回 401，
  * 但这类失败不代表登录态失效——只提示错误，不触发清态跳登录。
@@ -81,16 +89,19 @@ instance.interceptors.response.use(
         handleUnauthorized()
       }
     } else if (status === 403) {
-      ElMessage.error('没有操作权限')
+      // 403 的返回体也是统一结构，后端写明了原因
+      // （「你们还不是好友，每个方向只能发一条消息」「不是该课题组的成员」），
+      // 这些规则只能靠这句话向用户解释，所以优先展示；没有返回体时才用通用提示
+      ElMessage.error(backendMessage(error) || '没有操作权限')
     } else if (status === 404) {
-      ElMessage.error('请求的资源不存在')
+      ElMessage.error(backendMessage(error) || '请求的资源不存在')
     } else if (status >= 500) {
+      // 5xx 的后端文案可能带内部信息，仍用通用提示
       ElMessage.error('服务异常，请稍后重试')
     } else {
       // 400 / 409 等同样带统一返回体：优先展示后端给出的业务文案
       // （如「还有 1 条待处理申请，请先处理后再删除」），没有返回体时才退回 axios 的默认提示
-      const msg = (error?.response?.data as ApiResult | undefined)?.message
-      ElMessage.error(msg || error?.message || '网络异常，请稍后重试')
+      ElMessage.error(backendMessage(error) || error?.message || '网络异常，请稍后重试')
     }
     return Promise.reject(error)
   }
