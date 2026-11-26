@@ -91,17 +91,7 @@ async function shrinkAvatar(file: File): Promise<Blob | null> {
     const side = Math.min(bitmap.width, bitmap.height)
     const sx = (bitmap.width - side) / 2
     const sy = (bitmap.height - side) / 2
-    ctx.drawImage(
-      bitmap,
-      sx,
-      sy,
-      side,
-      side,
-      0,
-      0,
-      AVATAR_TARGET_SIZE,
-      AVATAR_TARGET_SIZE
-    )
+    ctx.drawImage(bitmap, sx, sy, side, side, 0, 0, AVATAR_TARGET_SIZE, AVATAR_TARGET_SIZE)
     bitmap.close()
     const blob = await new Promise<Blob | null>((resolve) => {
       canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.85)
@@ -213,7 +203,10 @@ async function handleSave(): Promise<void> {
 const friendLoading = ref(false)
 
 async function handleAddFriend(): Promise<void> {
-  if (!profile.value?.publicUid) return
+  if (!profile.value?.publicUid) {
+    ElMessage.warning(noUidTip)
+    return
+  }
   friendLoading.value = true
   try {
     await friendsApi.createFriendRequest(profile.value.publicUid)
@@ -241,7 +234,10 @@ async function handleRemoveFriend(): Promise<void> {
 }
 
 async function handleSendMessage(): Promise<void> {
-  if (!profile.value?.publicUid) return
+  if (!profile.value?.publicUid) {
+    ElMessage.warning(noUidTip)
+    return
+  }
   friendLoading.value = true
   try {
     const conv = await conversationsApi.openPrivateConversationByUid(profile.value.publicUid)
@@ -274,6 +270,16 @@ const canSendMessage = computed(() => !!profile.value && !profile.value.isSelf)
 
 /** 能否加好友：非好友且未申请过 */
 const canAddFriend = computed(() => profile.value?.relation === 'none')
+
+/**
+ * 对方还没有 UID（存量用户尚未触发分配）时无法加好友 / 发私信。
+ * 这两个入口都按 UID 找人，没有 UID 就只能停在这里——
+ * 之前是静默返回、点了没反应也不给提示（评审意见 R1）。
+ */
+const peerHasUid = computed(() => !!profile.value?.publicUid)
+
+/** 对方无 UID 时的禁用提示 */
+const noUidTip = '对方还没有 UID，暂时无法加好友或发私信'
 
 /** UID 复制 */
 async function copyUid(): Promise<void> {
@@ -314,7 +320,9 @@ async function copyUid(): Promise<void> {
           />
           <div class="profile-header__info">
             <div class="profile-header__name">
-              <span class="profile-header__nickname">{{ profile.nickname || profile.publicUid }}</span>
+              <span class="profile-header__nickname">
+                {{ profile.nickname || profile.publicUid }}
+              </span>
               <el-tag v-if="profile.isSelf" size="small" type="info">这是你</el-tag>
             </div>
             <div class="profile-header__uid">
@@ -339,14 +347,19 @@ async function copyUid(): Promise<void> {
             <el-button @click="router.push('/profile/settings')">账号与安全</el-button>
           </template>
           <template v-else>
-            <el-button
-              v-if="canAddFriend"
-              type="primary"
-              :loading="friendLoading"
-              @click="handleAddFriend"
-            >
-              加好友
-            </el-button>
+            <el-tooltip :content="noUidTip" :disabled="peerHasUid" placement="top">
+              <span>
+                <el-button
+                  v-if="canAddFriend"
+                  type="primary"
+                  :loading="friendLoading"
+                  :disabled="!peerHasUid"
+                  @click="handleAddFriend"
+                >
+                  加好友
+                </el-button>
+              </span>
+            </el-tooltip>
             <el-button
               v-if="profile.relation === 'friends'"
               :loading="friendLoading"
@@ -354,15 +367,20 @@ async function copyUid(): Promise<void> {
             >
               删除好友
             </el-button>
-            <el-button
-              v-if="canSendMessage"
-              type="primary"
-              plain
-              :loading="friendLoading"
-              @click="handleSendMessage"
-            >
-              发私信
-            </el-button>
+            <el-tooltip :content="noUidTip" :disabled="peerHasUid" placement="top">
+              <span>
+                <el-button
+                  v-if="canSendMessage"
+                  type="primary"
+                  plain
+                  :loading="friendLoading"
+                  :disabled="!peerHasUid"
+                  @click="handleSendMessage"
+                >
+                  发私信
+                </el-button>
+              </span>
+            </el-tooltip>
           </template>
         </div>
 
@@ -395,12 +413,7 @@ async function copyUid(): Promise<void> {
                 >
                   <el-button :loading="uploading">上传图片</el-button>
                 </el-upload>
-                <el-button
-                  v-if="editForm.avatar"
-                  link
-                  type="danger"
-                  @click="editForm.avatar = ''"
-                >
+                <el-button v-if="editForm.avatar" link type="danger" @click="editForm.avatar = ''">
                   恢复默认头像
                 </el-button>
               </div>
@@ -429,9 +442,7 @@ async function copyUid(): Promise<void> {
               </el-radio>
             </el-radio-group>
             <div class="visibility-hint">
-              {{
-                VISIBILITY_OPTIONS.find((o) => o.value === editForm.profileVisibility)?.hint
-              }}
+              {{ VISIBILITY_OPTIONS.find((o) => o.value === editForm.profileVisibility)?.hint }}
             </div>
           </el-form-item>
 

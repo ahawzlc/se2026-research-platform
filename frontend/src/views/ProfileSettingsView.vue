@@ -92,9 +92,7 @@ async function handleSubmit(): Promise<void> {
           <el-input v-model="form.confirmPassword" type="password" show-password />
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" :loading="loading" @click="handleSubmit">
-            修改密码
-          </el-button>
+          <el-button type="primary" :loading="loading" @click="handleSubmit">修改密码</el-button>
         </el-form-item>
       </el-form>
     </el-card>
@@ -117,7 +115,8 @@ async function handleSubmit(): Promise<void> {
       </el-descriptions>
       <div class="settings-tip">
         UID 与用户名创建后不可修改；昵称、头像、简介与可见范围可在
-        <el-link type="primary" @click="router.push('/profile')">个人主页</el-link> 修改。
+        <el-link type="primary" @click="router.push('/profile')">个人主页</el-link>
+        修改。
       </div>
     </el-card>
   </div>

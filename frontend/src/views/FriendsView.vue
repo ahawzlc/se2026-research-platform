@@ -133,7 +133,7 @@ async function handleRemove(item: FriendItem): Promise<void> {
 async function handleWithdraw(item: FriendRequestItem): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `确定撤回发给「${displayName(item)}」的好友申请吗？撤回后短期内不能再次申请（3 天冷却）。`,
+      `确定撤回发给「${displayName(item)}」的好友申请吗？撤回后可以随时重新申请。`,
       '撤回申请',
       {
         type: 'warning',
@@ -230,9 +230,7 @@ const pendingCount = computed(() => incoming.value.length)
         >
           <template #prepend>UID</template>
         </el-input>
-        <el-button type="primary" :loading="adding" @click="handleAddFriend">
-          加好友
-        </el-button>
+        <el-button type="primary" :loading="adding" @click="handleAddFriend">加好友</el-button>
       </div>
       <div class="friends-add__hint">
         UID 在对方的个人主页上可以看到。我的 UID：
