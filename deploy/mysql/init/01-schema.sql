@@ -29,17 +29,21 @@ USE `se2026`;
 
 DROP TABLE IF EXISTS `user`;
 CREATE TABLE `user` (
-  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
-  `username`      VARCHAR(50)     NOT NULL                COMMENT '登录名，唯一',
-  `password_hash` VARCHAR(100)    NOT NULL                COMMENT '密码哈希（BCrypt），禁止明文',
-  `nickname`      VARCHAR(50)     NOT NULL DEFAULT ''     COMMENT '昵称',
-  `avatar`        VARCHAR(255)    NOT NULL DEFAULT ''     COMMENT '头像地址',
-  `email`         VARCHAR(100)    NOT NULL DEFAULT ''     COMMENT '邮箱',
-  `created_at`    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-  `updated_at`    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-  `deleted`       TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
+  `id`                  BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `username`            VARCHAR(50)     NOT NULL                COMMENT '登录名，唯一',
+  `password_hash`       VARCHAR(100)    NOT NULL                COMMENT '密码哈希（BCrypt），禁止明文',
+  `nickname`            VARCHAR(50)     NOT NULL DEFAULT ''     COMMENT '昵称',
+  `avatar`              VARCHAR(255)    NOT NULL DEFAULT ''     COMMENT '头像地址，空表示用昵称首字母生成默认头像',
+  `email`               VARCHAR(100)    NOT NULL DEFAULT ''     COMMENT '邮箱',
+  `public_uid`          VARCHAR(20)     NULL                    COMMENT '对外展示的 UID，创建后不可变，唯一；NULL 表示尚未分配（存量用户首次返回本人信息时由应用层随机分配）',
+  `bio`                 VARCHAR(500)    NOT NULL DEFAULT ''     COMMENT '个人简介',
+  `profile_visibility`  VARCHAR(20)     NOT NULL DEFAULT 'public' COMMENT '主页可见范围：public 所有人可见 / friends 仅好友可见 / private 仅自己可见',
+  `created_at`          DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at`          DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `deleted`             TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_user_username` (`username`),
+  UNIQUE KEY `uk_user_public_uid` (`public_uid`),
   KEY `idx_user_email` (`email`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户';
 

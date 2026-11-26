@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { authApi, conversationsApi, projectsApi, teamsApi } from '@/api'
 import type { ConversationItem, ConversationType, MessageItem } from '@/api/conversations'
 import type { ProjectItem } from '@/api/projects'
@@ -20,6 +20,7 @@ const POLL_INTERVAL_MS = 30_000
 const userStore = useUserStore()
 const route = useRoute()
 const myUserId = computed(() => userStore.userInfo?.id ?? '')
+const router = useRouter()
 
 // ---------------------------------------------------------------- 会话列表
 
@@ -121,7 +122,9 @@ async function scrollToBottom(): Promise<void> {
 const privateVisible = ref(false)
 const privateLoading = ref(false)
 const peerUserId = ref('')
-/** 私信对象：我所在课题组的全部成员（去重、排除自己），双方同组是后端硬约束 */
+/** 按 UID 发起（线③ 卡 E-3：私信不再要求同组，故允许直接输入 UID） */
+const peerUid = ref('')
+/** 私信候选：我所在课题组的全部成员（去重、排除自己）；组外的人走 UID 输入 */
 const candidateMembers = ref<TeamMemberItem[]>([])
 
 const groupVisible = ref(false)
@@ -143,6 +146,7 @@ async function loadCandidates(): Promise<void> {
 
 function openPrivateDialog(): void {
   peerUserId.value = ''
+  peerUid.value = ''
   privateVisible.value = true
   if (candidateMembers.value.length === 0) {
     void loadCandidates()
@@ -150,10 +154,13 @@ function openPrivateDialog(): void {
 }
 
 async function handlePrivateCreate(): Promise<void> {
-  if (!peerUserId.value) return
+  const uid = peerUid.value.trim()
+  if (!peerUserId.value && !uid) return
   privateLoading.value = true
   try {
-    const conv = await conversationsApi.ensurePrivateConversation(peerUserId.value)
+    const conv = uid
+      ? await conversationsApi.openPrivateConversationByUid(uid)
+      : await conversationsApi.ensurePrivateConversation(peerUserId.value)
     privateVisible.value = false
     await loadConversations()
     const target = conversations.value.find((c) => c.id === conv.id)
@@ -213,16 +220,36 @@ async function handleGroupCreate(): Promise<void> {
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
-onMounted(() => {
+/**
+ * 支持从好友页 / 个人主页跳过来时直接打开指定会话：
+ * 路由带 ?conversation=<id> 时，会话列表加载完成后自动打开该会话。
+ */
+
+async function openFromRoute(): Promise<void> {
+  const target = route.query.conversation
+  if (typeof target !== 'string' || !target) return
+  const conv = conversations.value.find((c) => c.id === target)
+  if (conv) {
+    await openConversation(conv)
+    // 打开后清掉 query，避免刷新时重复触发
+    await router.replace({ path: '/messages' })
+  }
+}
+
+onMounted(async () => {
   // userInfo 只在内存，刷新后凭 token 回填（同 BasicLayout 的做法）
   if (userStore.token && !userStore.userInfo) {
-    authApi
+    await authApi
       .fetchMe()
       .then((info) => userStore.setUserInfo(info))
       .catch(() => {})
   }
-  void loadConversations()
-  void openPeerFromRoute()
+  await loadConversations()
+  // 两个直达参数都要处理：
+  //   ?conversation=<id> → 本卡（线③ E-3）：从好友页 / 个人主页跳过来
+  //   ?peer=<uid>       → 线②：按 UID 打开私信会话
+  await openFromRoute()
+  await openPeerFromRoute()
   void pollUnread()
   pollTimer = setInterval(() => {
     void pollUnread()
@@ -242,6 +269,7 @@ onBeforeUnmount(() => {
         <div class="conv-header">
           <span class="conv-title">会话</span>
           <div class="conv-actions">
+            <el-button size="small" @click="router.push('/friends')">好友</el-button>
             <el-button size="small" @click="openPrivateDialog">私信</el-button>
             <el-button size="small" type="primary" @click="openGroupDialog">讨论区</el-button>
           </div>
@@ -356,9 +384,24 @@ onBeforeUnmount(() => {
           :value="m.userId"
         />
       </el-select>
+      <el-divider>或按 UID 找人</el-divider>
+      <el-input
+        v-model="peerUid"
+        placeholder="输入对方 UID（如 U0000000123）"
+        clearable
+        @keyup.enter="handlePrivateCreate"
+      />
+      <p class="dialog-hint">
+        非好友之间每个方向只能发一条消息；成为好友后可自由交流
+      </p>
       <template #footer>
         <el-button @click="privateVisible = false">取消</el-button>
-        <el-button type="primary" :disabled="!peerUserId" :loading="privateLoading" @click="handlePrivateCreate">
+        <el-button
+          type="primary"
+          :disabled="!peerUserId && !peerUid.trim()"
+          :loading="privateLoading"
+          @click="handlePrivateCreate"
+        >
           开始私信
         </el-button>
       </template>

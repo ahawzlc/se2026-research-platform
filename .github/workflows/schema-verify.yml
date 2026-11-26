@@ -60,6 +60,14 @@ jobs:
           check 38 "$(q "SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='se2026'")" "外键总数"
           check 8  "$(q "SELECT COUNT(*) FROM se2026.community_tag WHERE deleted=0")" "标签字典种子"
           check 1  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='conversation' AND column_name='type' AND column_comment LIKE '%meeting%'")" "conversation.type 含 meeting"
+          # 线③ 卡 E-3：user 表新增 3 列（public_uid/bio/profile_visibility）
+          check 3  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user' AND column_name IN ('public_uid','bio','profile_visibility')")" "user 表线③新增列数"
+          check 12 "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user'")" "user 表总列数"
+          check 1  "$(q "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics WHERE table_schema='se2026' AND table_name='user' AND index_name='uk_user_public_uid'")" "uk_user_public_uid 唯一索引存在"
+          # 列顺序（迁移脚本用 AFTER 保证与全新安装同构，见评审意见 B2②）
+          check "email public_uid bio profile_visibility created_at" \
+            "$(q "SELECT GROUP_CONCAT(column_name ORDER BY ordinal_position SEPARATOR ' ') FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user' AND column_name IN ('email','public_uid','bio','profile_visibility','created_at')")" \
+            "user 表列顺序"
           echo "PATH_A_OK 全新安装路径通过"
 
       - name: 路径B 存量升级——基线 init SQL + 依序回放 migrations
@@ -82,6 +90,14 @@ jobs:
           check 38 "$(q "SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='se2026'")" "外键总数"
           check 8  "$(q "SELECT COUNT(*) FROM se2026.community_tag WHERE deleted=0")" "标签字典种子"
           check 1  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='conversation' AND column_name='type' AND column_comment LIKE '%meeting%'")" "conversation.type 含 meeting"
+          # 线③ 卡 E-3：迁移后 user 表必须与全新安装同构
+          check 3  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user' AND column_name IN ('public_uid','bio','profile_visibility')")" "user 表线③新增列数"
+          check 12 "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user'")" "user 表总列数"
+          check 1  "$(q "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics WHERE table_schema='se2026' AND table_name='user' AND index_name='uk_user_public_uid'")" "uk_user_public_uid 唯一索引存在"
+          # 列顺序必须与全新安装一致（迁移脚本用 AFTER email 保证，见评审意见 B2②）
+          check "email public_uid bio profile_visibility created_at" \
+            "$(q "SELECT GROUP_CONCAT(column_name ORDER BY ordinal_position SEPARATOR ' ') FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user' AND column_name IN ('email','public_uid','bio','profile_visibility','created_at')")" \
+            "user 表列顺序"
           echo "PATH_B_OK 存量升级路径通过"
 
       - name: 断言C——迁移幂等（重复回放不炸、数据不翻倍）

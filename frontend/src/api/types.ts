@@ -28,6 +28,8 @@ export interface UserInfo {
   nickname: string
   avatar: string
   email: string
+  /** 对外展示的 UID（线③ 卡 E-3：注册即分配，创建后不可变） */
+  publicUid: string
 }
 
 export interface LoginResult {

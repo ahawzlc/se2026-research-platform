@@ -17,6 +17,9 @@ import { HealthController } from './health/health.controller';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { AchievementsModule } from './achievements/achievements.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { UsersModule } from './users/users.module';
+import { FriendsModule } from './friends/friends.module';
+import { RateLimitModule } from './common/rate-limit.module';
 import { CommunityModule } from './community/community.module';
 
 @Module({
@@ -39,6 +42,10 @@ import { CommunityModule } from './community/community.module';
     MeetingsModule,
     AchievementsModule,
     NotificationsModule,
+    UsersModule,
+    FriendsModule,
+    // 限流能力全局可用（好友申请防骚扰用，见 RateLimitModule 注释）
+    RateLimitModule,
     CommunityModule,
   ],
   controllers: [HealthController],

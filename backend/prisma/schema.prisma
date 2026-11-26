@@ -40,6 +40,12 @@ model User {
   nickname     String   @default("") @db.VarChar(50)
   avatar       String   @default("") @db.VarChar(255)
   email        String   @default("") @db.VarChar(100)
+  /// 对外展示的 UID，创建后不可变；NULL 表示尚未分配（存量用户由迁移脚本回填）
+  publicUid    String?  @unique(map: "uk_user_public_uid") @map("public_uid") @db.VarChar(20)
+  /// 个人简介
+  bio          String   @default("") @db.VarChar(500)
+  /// 主页可见范围：public / friends / private
+  profileVisibility String @default("public") @map("profile_visibility") @db.VarChar(20)
   createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(0)
   updatedAt    DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(0)
   deleted      Int      @default(0) @db.UnsignedTinyInt

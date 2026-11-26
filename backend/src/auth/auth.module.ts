@@ -4,7 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './jwt.strategy';
-import { RateLimitService } from './rate-limit.service';
+import { UsersModule } from '../users/users.module';
 
 @Module({
   imports: [
@@ -20,9 +20,11 @@ import { RateLimitService } from './rate-limit.service';
         },
       }),
     }),
+    // 注册时分配对外 UID（线③ 卡 E-3）
+    UsersModule,
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, RateLimitService],
+  providers: [AuthService, JwtStrategy],
   exports: [AuthService],
 })
 export class AuthModule {}

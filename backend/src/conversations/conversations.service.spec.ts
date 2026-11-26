@@ -49,6 +49,9 @@ function createService() {
       findFirst: jest.fn<Promise<unknown>, [unknown]>(),
       findMany: jest.fn<Promise<unknown[]>, [unknown]>(),
     },
+    user: {
+      findFirst: jest.fn<Promise<unknown>, [unknown]>(),
+    },
     project: {
       findFirst: jest.fn<Promise<unknown>, [unknown]>(),
     },
@@ -87,13 +90,49 @@ describe('ConversationsService.ensurePrivateConversation', () => {
     ).rejects.toMatchObject({ code: 400 });
   });
 
-  it('对方不在同一课题组 → 403', async () => {
+  /**
+   * 线③ 卡 E-3 改了口径：私信不再要求同组，
+   * 任何登录用户都能给任何其他登录用户发私信（首次打招呼模式）。
+   */
+  it('对方不存在 → 404', async () => {
     const { service, prisma } = createService();
-    prisma.teamMember.findMany.mockResolvedValue([{ teamId: 7n }]);
-    prisma.teamMember.findFirst.mockResolvedValue(null);
+    prisma.user.findFirst.mockResolvedValue(null);
     await expect(
       service.ensurePrivateConversation('1', { peerUserId: '2' }),
-    ).rejects.toMatchObject({ code: 403 });
+    ).rejects.toMatchObject({ code: 404, message: '用户不存在' });
+  });
+
+  it('对方与我不在同一课题组 → 仍可创建（不再要求同组）', async () => {
+    const { service, prisma } = createService();
+    prisma.user.findFirst.mockResolvedValue({ id: 2n });
+    prisma.teamMember.findMany.mockResolvedValue([{ teamId: 7n }]);
+    prisma.teamMember.findFirst.mockResolvedValue(null); // 对方不在本组
+    prisma.conversation.findFirst.mockResolvedValue(null); // 尚无会话
+    prisma.conversation.create.mockResolvedValue({ id: 5n });
+    prisma.conversationMember.findFirst.mockResolvedValue(null);
+    prisma.conversationMember.create.mockResolvedValue({});
+    prisma.conversation.findFirst.mockResolvedValue({
+      id: 5n,
+      type: 'private',
+      title: null,
+      refType: null,
+      refId: null,
+      updatedAt: new Date('2026-11-23T02:00:00Z'),
+      members: [{ lastReadAt: null }],
+    });
+    prisma.conversationMember.findMany.mockResolvedValue([
+      {
+        conversationId: 5n,
+        user: { username: 'lisi', nickname: '李四' },
+      },
+    ]);
+    prisma.message.findFirst.mockResolvedValue(null);
+    prisma.message.count.mockResolvedValue(0);
+
+    const result = await service.ensurePrivateConversation('1', {
+      peerUserId: '2',
+    });
+    expect(result.id).toBe('5');
   });
 });
 

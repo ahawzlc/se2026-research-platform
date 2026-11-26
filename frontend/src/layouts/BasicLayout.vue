@@ -56,7 +56,7 @@ async function loadRecent(): Promise<void> {
 }
 
 function refTarget(item: NotificationItem): string {
-  // 已知来源跳对应页面；friendship 待线③页面落地后接入
+  // 已知来源跳对应页面；community_post 跳社区帖，friendship 跳好友页
   if (item.refType === 'community_post') {
     // 「有人申请加入」直达该帖的申请管理页签，其余社区通知进详情
     const tab = item.type === 'team_apply' ? '?tab=applications' : ''
@@ -64,6 +64,11 @@ function refTarget(item: NotificationItem): string {
   }
   if (item.refType === 'meeting') return `/meetings?meetingId=${encodeURIComponent(item.refId)}`
   if (item.refType === 'conversation') return '/messages'
+  // 好友通知 → 好友页（线③ 卡 E-3）
+  // 「申请」类落到「收到的申请」页签，「通过」类落到「好友」页签
+  if (item.refType === 'friendship') {
+    return item.type === 'friend_request' ? '/friends?tab=requests' : '/friends?tab=friends'
+  }
   return ''
 }
 
@@ -96,6 +101,7 @@ const menuItems = [
   { path: '/meetings', title: '会议管理' },
   { path: '/achievements', title: '成果管理' },
   { path: '/messages', title: '协作消息' },
+  { path: '/friends', title: '好友' },
   { path: '/contribution', title: '参与度分析' },
   { path: '/members', title: '课题组成员' }
 ]
@@ -113,6 +119,8 @@ function handleCommand(command: string): void {
     void router.replace({ name: 'login' })
   } else if (command === 'settings') {
     settingsVisible.value = true
+  } else if (command === 'profile') {
+    void router.push('/profile')
   }
 }
 
@@ -173,6 +181,7 @@ const settingsVisible = ref(false)
             <span class="app-user">{{ displayName }}</span>
             <template #dropdown>
               <el-dropdown-menu>
+                <el-dropdown-item command="profile">个人主页</el-dropdown-item>
                 <el-dropdown-item command="settings">个人设置</el-dropdown-item>
                 <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
               </el-dropdown-menu>
