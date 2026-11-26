@@ -608,7 +608,11 @@ describe('FriendsService.createRequest', () => {
     prisma.friendship.findFirst.mockResolvedValue(null);
     stubFriendshipLookup(prisma, {
       rows: [
-        buildFriendship({ status: 'pending', requesterId: 1n, addresseeId: 2n }),
+        buildFriendship({
+          status: 'pending',
+          requesterId: 1n,
+          addresseeId: 2n,
+        }),
       ],
     });
     rateLimit.hit.mockReturnValue(true);

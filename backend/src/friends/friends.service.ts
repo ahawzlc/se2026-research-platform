@@ -564,7 +564,6 @@ export class FriendsService {
       return null; // 冷却期已过
     }
 
-    const remainMs = FRIEND_REQUEST_COOLDOWN_MS - elapsed;
     // 剩余天数按「天」向上取整：还剩 2.9 天 → 提示 3 天
     //
     // **注意 elapsed 可能为负**（评审意见 R2）：
