@@ -173,20 +173,6 @@ export class FriendsService {
       throw BizException.conflict(cooldown);
     }
 
-    // 防骚扰 2：每人每天的申请次数上限
-    // 挡住「拿到 UID 批量发申请」的机器行为（每发一次都会给对方推一条通知）。
-    if (
-      !this.rateLimit.hit(
-        `friend-request:${me.toString()}`,
-        FRIEND_REQUEST_DAILY_LIMIT,
-        FRIEND_REQUEST_WINDOW_MS,
-      )
-    ) {
-      throw BizException.param(
-        `今日好友申请次数已达上限（${FRIEND_REQUEST_DAILY_LIMIT} 次），请明天再试`,
-      );
-    }
-
     // 双向查一次：确保「一对用户至多一行」
     // （`uk_friendship` 是有方向的唯一键，(A,B) 与 (B,A) 是两个不同的键）
     const allRows = await listFriendshipsBetween(this.prisma, me, peer.id);
@@ -208,6 +194,26 @@ export class FriendsService {
     // 我发起的 pending → 409（同一行不可重复申请）
     if (mine && mine.status === FRIENDSHIP_STATUS.PENDING) {
       throw BizException.conflict('好友申请已发出，等待对方处理');
+    }
+
+    // 防骚扰 2：每人每天的申请次数上限
+    // 挡住「拿到 UID 批量发申请」的机器行为（每发一次都会给对方推一条通知）。
+    //
+    // **计数时机放在重复校验之后**（评审建议项）：
+    // 早期实现在查重之前就 hit，导致对同一个等待中的人反复点「申请」，
+    // 每次 409 都会扣当天的额度——实测 18 次重复申请就把 20 次额度用光了，
+    // 正常用户反而申请不了新好友。改到校验之后，
+    // 只有「真正会发出申请」才计数。
+    if (
+      !this.rateLimit.hit(
+        `friend-request:${me.toString()}`,
+        FRIEND_REQUEST_DAILY_LIMIT,
+        FRIEND_REQUEST_WINDOW_MS,
+      )
+    ) {
+      throw BizException.param(
+        `今日好友申请次数已达上限（${FRIEND_REQUEST_DAILY_LIMIT} 次），请明天再试`,
+      );
     }
 
     let requestId: bigint;
@@ -258,7 +264,7 @@ export class FriendsService {
     //
     // 标题里的主语是**发起人**（当前登录用户），不是接收人。
     // 早期版本误用了 peer 的昵称，导致收件人看到「李四 请求加你为好友」
-    // 而他自己就是李四（详见 docs/17-线③开发留痕.md 缺陷 A1）。
+    // 而他自己就是李四（详见 docs/16-线③开发留痕.md 缺陷 A1）。
     const meRow = await this.prisma.user.findFirst({
       where: { id: me, deleted: 0 },
       select: { username: true, nickname: true },
@@ -332,7 +338,7 @@ export class FriendsService {
     //
     // 标题里的主语是**同意人**（当前登录用户），不是申请方。
     // 早期版本误用了 requester 的昵称，导致申请方看到「李四 已同意你的好友申请」
-    // 而他自己就是李四（详见 docs/17-线③开发留痕.md 缺陷 A1）。
+    // 而他自己就是李四（详见 docs/16-线③开发留痕.md 缺陷 A1）。
     const meRow = await this.prisma.user.findFirst({
       where: { id: me, deleted: 0 },
       select: { username: true, nickname: true },
@@ -390,15 +396,19 @@ export class FriendsService {
    *   - 只能撤回**自己**发出的申请（我是 requester）；
    *   - 只能撤回 **pending** 状态的申请（对方已处理的就不能撤了）。
    *
-   * 状态流转：pending → rejected。
+   * 状态流转：pending → **逻辑删除**（`deleted = 1`）。
    *
-   * 为什么用 rejected 而不是物理删行 / 新增一个 cancelled 状态：
+   * **为什么撤回改逻辑删除而不是转 rejected**（评审意见 R2，牵头人 2026-11-25 定）：
+   * 撤回是**自己主动撤的**，对方根本没有拒绝过。
+   * 早期实现把撤回也写成 `rejected`，结果撤回后马上再申请被当成
+   * 「对方刚刚拒绝过你」拦 3 天，提示还写成 4 天——用户点错一次代价是 3 天，
+   * 明显不合理。故撤回**不进冷却期**。
+   *
+   * 逻辑删除（而非物理删行）的原因：
    *   - 唯一键 `uk_friendship` 不区分 deleted，物理删行会腾出键，
    *     与「一对用户至多一行」的不变式冲突（下次申请会插新行）；
-   *   - rejected 是现有状态机里已有的终态，复用它不必改 schema；
-   *   - 撤回后仍会受**被拒冷却期**约束（见 friends.constants.ts），
-   *     这是有意的：撤回也是一种「对方没接受」的信号，
-   *     防止「发申请→被拒→撤回→再发」无限循环骚扰。
+   *   - 逻辑删除后重新申请时，走已有的「复活旧行」路径（见 createRequest），
+   *     不会插第二行。
    */
   async withdrawRequest(userId: string, requestIdParam: string): Promise<void> {
     const requestId = parseId(requestIdParam);
@@ -418,9 +428,10 @@ export class FriendsService {
       throw BizException.conflict('该申请已被处理，无法撤回');
     }
 
+    // 逻辑删除：撤回不进冷却期（状态保持 pending 也无所谓，deleted=1 已使其不可见）
     await this.prisma.friendship.update({
       where: { id: row.id },
-      data: { status: FRIENDSHIP_STATUS.REJECTED, handledAt: new Date() },
+      data: { deleted: 1 },
     });
     // 撤回不发通知（对方本来就不需要知道）
   }
@@ -555,7 +566,18 @@ export class FriendsService {
 
     const remainMs = FRIEND_REQUEST_COOLDOWN_MS - elapsed;
     // 剩余天数按「天」向上取整：还剩 2.9 天 → 提示 3 天
-    const remainDays = Math.max(1, Math.ceil(remainMs / FRIEND_REQUEST_DAY_MS));
+    //
+    // **注意 elapsed 可能为负**（评审意见 R2）：
+    // `handled_at` 落库时按秒四舍五入，可能比当前时间还晚不到 1 秒
+    // （MySQL 8 实测 `.669` 会存成下一秒），elapsed 成了负数，
+    // 向上取整就会多算一天（提示 4 天而不是 3 天）。
+    // 故先把 elapsed 夹到 0，再按整天算剩余天数。
+    const elapsedClamped = Math.max(0, elapsed);
+    const remainMsClamped = FRIEND_REQUEST_COOLDOWN_MS - elapsedClamped;
+    const remainDays = Math.max(
+      1,
+      Math.ceil(remainMsClamped / FRIEND_REQUEST_DAY_MS),
+    );
     return `对方刚刚拒绝过你的好友申请，${remainDays} 天内不能再发起申请`;
   }
 

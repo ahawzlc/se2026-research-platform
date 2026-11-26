@@ -71,7 +71,6 @@ export class UsersService {
     const fresh = await this.findActiveUser(userId);
     return this.toProfileView(fresh, { relation: 'none', isSelf: true });
   }
-
   /**
    * 更新我的主页资料。
    *
@@ -278,22 +277,36 @@ export class UsersService {
    *
    * 存量用户的 `public_uid` 是 NULL——迁移脚本**故意不回填**
    * （用 id 回填等于让 UID 等于自增 id，照样可枚举，与引入 UID 的理由矛盾，
-   * 见评审意见 C2①）。改为用户**首次访问 `/users/me` 时**在这里随机分配。
+   * 见评审意见 C2①）。改为在用户**首次经过任一返回本人信息的接口**时随机分配：
+   * `/auth/me`（启动路径）、`/users/me`（个人主页）、登录与注册。
    *
    * 顺带解决了「迁移已执行、部署未上线期间注册的用户没有 UID」的问题：
    * 这类用户同样走这里补分配。
    *
+   * **为什么启动路径也必须分配**（评审意见 R1）：
+   * 早期实现只在 `/users/me` 分配，导致存量用户必须亲自点开「个人主页」
+   * 才拿到 UID。在那之前，别人既加不了他（好友申请按 UID 找人）、
+   * 也发不了私信（私信同样按 UID 找人），而他自己在好友页看到的却是
+   * 「我的 UID：未分配」——等于上线即不可用。故 `/auth/me` 等返回本人信息
+   * 的路径都要补一次分配。
+   *
    * 唯一索引 `uk_user_public_uid` 是硬约束，撞号就重试。
-   * 并发下两个请求可能同时分配到不同 UID，后写覆盖先写——
-   * 结果仍是一个合法且唯一的 UID，可接受。
+   * 并发下用 `updateMany({ where: { id, publicUid: null } })` 落库：
+   * 先写的生效，后写的更新 0 行并重新读取，
+   * **不会**出现「后写覆盖先写」导致 UID 被改掉的情况。
+   *
+   * @returns 该用户当前的 UID（已有则原样返回；分配失败返回空串）
    */
-  async ensurePublicUid(userId: bigint): Promise<void> {
+  async ensurePublicUid(userId: bigint): Promise<string> {
     const user = await this.prisma.user.findFirst({
       where: { id: userId, deleted: 0 },
       select: { publicUid: true },
     });
-    if (!user || user.publicUid) {
-      return; // 已有 UID，无需分配
+    if (!user) {
+      return ''; // 用户不存在
+    }
+    if (user.publicUid) {
+      return user.publicUid; // 已有 UID，无需分配
     }
 
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -306,18 +319,29 @@ export class UsersService {
         continue; // 撞号，换一个
       }
       try {
-        await this.prisma.user.update({
-          where: { id: userId },
+        // 条件更新：只有 UID 仍为空时才写入
+        // （并发下另一个请求可能已经分配好了，此时 updated.count 为 0）
+        const updated = await this.prisma.user.updateMany({
+          where: { id: userId, publicUid: null },
           data: { publicUid: candidate },
         });
-        return;
+        if (updated.count > 0) {
+          return candidate; // 分配成功
+        }
+        // count 为 0 → 已被并发分配，重新读一次拿到对方分配的 UID
+        const fresh = await this.prisma.user.findFirst({
+          where: { id: userId, deleted: 0 },
+          select: { publicUid: true },
+        });
+        return fresh?.publicUid ?? '';
       } catch (err) {
         // 并发下可能撞唯一索引（P2002），重试即可；
         // 其他错误（账号被删等）直接放弃，UID 只是展示用的标识，不该让主页打不开
         if (!isUniqueViolation(err)) {
-          return;
+          return '';
         }
       }
     }
+    return '';
   }
 }

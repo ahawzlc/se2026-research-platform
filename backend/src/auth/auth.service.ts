@@ -140,8 +140,13 @@ export class AuthService {
   /** 当前用户：按令牌载荷查库，账号已删除则视为登录态失效 */
   async me(userId: string): Promise<UserProfile> {
     const user = await this.findActiveUser(userId);
+    // 存量用户的 UID 在这里补分配（评审意见 R1）：
+    // 启动路径走的是 /auth/me 而不是 /users/me，
+    // 若不分配，存量用户必须亲自点开「个人主页」才有 UID，
+    // 在那之前别人加不了他、也发不了私信。
+    const publicUid = await this.users.ensurePublicUid(user.id);
     return {
-      ...this.toSafeUser(user),
+      ...this.toSafeUser({ ...user, publicUid }),
       createdAt: formatDateTime(user.createdAt),
     };
   }
@@ -162,8 +167,10 @@ export class AuthService {
         ...(dto.email !== undefined ? { email: dto.email } : {}),
       },
     });
+    // 同样补分配 UID（与 /auth/me、登录注册口径一致，见评审意见 R1）
+    const publicUid = await this.users.ensurePublicUid(updated.id);
     return {
-      ...this.toSafeUser(updated),
+      ...this.toSafeUser({ ...updated, publicUid }),
       createdAt: formatDateTime(updated.createdAt),
     };
   }
@@ -208,6 +215,9 @@ export class AuthService {
   }
 
   private async issueAuthResult(user: User): Promise<AuthResult> {
+    // 存量用户登录时补分配 UID（评审意见 R1）：
+    // 登录/注册/改密都经由这里返回本人信息，与 /auth/me 口径一致。
+    const publicUid = await this.users.ensurePublicUid(user.id);
     const roles = await this.loadRoleSnapshot(user.id);
     const token = await this.sign({
       userId: user.id,
@@ -218,7 +228,7 @@ export class AuthService {
       token,
       tokenType: 'Bearer',
       expiresIn: this.expiresInSeconds,
-      user: this.toSafeUser(user),
+      user: this.toSafeUser({ ...user, publicUid }),
     };
   }
 
