@@ -4,17 +4,19 @@
  */
 import { projectsApi, tasksApi } from '@/api'
 import type { MilestoneItem, ProjectItem } from '@/api/projects'
-import type { TaskItem } from '@/api/tasks'
+import type { TaskItem, TaskQuery } from '@/api/tasks'
 
 /** 今天（yyyy-MM-dd，与库里 dueDate 同格式） */
-export function today(): string {
-  return new Date().toISOString().slice(0, 10)
+export function today(date = new Date()): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
+    date.getDate()
+  ).padStart(2, '0')}`
 }
 
 function daysLater(n: number): string {
   const d = new Date()
   d.setDate(d.getDate() + n)
-  return d.toISOString().slice(0, 10)
+  return today(d)
 }
 
 /** 已逾期：截止日期早于今天且未完成（与 TasksView 看板标红同一口径） */
@@ -50,34 +52,20 @@ export interface OverviewSnapshot {
   overdueMilestones: MilestoneWithContext[]
   /** 临期（3 天内）未完成任务 */
   dueSoonTasks: TaskItem[]
-  /** 当前用户被指派且未完成的任务（F-3） */
-  myTasks: TaskItem[]
 }
 
-async function fetchAllProjectTasks(projectId: string): Promise<TaskItem[]> {
-  const all: TaskItem[] = []
-  let page = 1
-  while (true) {
-    const result = await tasksApi.fetchTasks({ projectId, page, size: 100 })
-    all.push(...result.list)
-    if (result.list.length < 100 || all.length >= result.total) break
-    page += 1
-  }
-  return all
-}
-
-export async function loadOverview(userId?: string): Promise<OverviewSnapshot> {
+export async function loadOverview(): Promise<OverviewSnapshot> {
   const projectResult = await projectsApi.fetchProjects({ page: 1, size: 100 })
   const projects = projectResult.list
 
   const perProject = await Promise.all(
     projects.map(async (project) => {
       const [tasksRes, milestones] = await Promise.all([
-        fetchAllProjectTasks(project.id),
+        tasksApi.fetchTasks({ projectId: project.id, page: 1, size: 100 }),
         projectsApi.fetchMilestones(project.id)
       ])
       return {
-        tasks: tasksRes,
+        tasks: tasksRes.list as TaskItem[],
         milestones: milestones.map((m) => ({ ...m, projectName: project.name }))
       }
     })
@@ -86,18 +74,61 @@ export async function loadOverview(userId?: string): Promise<OverviewSnapshot> {
   const allTasks = perProject.flatMap((p) => p.tasks)
   const allMilestones = perProject.flatMap((p) => p.milestones)
   const activeTasks = allTasks.filter((t) => t.status !== 'done')
-  const myTasks = userId
-    ? activeTasks.filter((task) => task.assigneeId === userId)
-    : []
 
   return {
     projects,
     activeTasks,
-    overdueTasks: activeTasks.filter(isTaskOverdue).sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
+    overdueTasks: activeTasks
+      .filter(isTaskOverdue)
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
     overdueMilestones: allMilestones
       .filter(isMilestoneOverdue)
       .sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
-    dueSoonTasks: activeTasks.filter(isTaskDueSoon).sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
-    myTasks
+    dueSoonTasks: activeTasks
+      .filter(isTaskDueSoon)
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate))
   }
+}
+
+/** 看板与我的待办共用的分页读取；权限范围由任务接口在服务端限定。 */
+export async function fetchAllTasks(query: Omit<TaskQuery, 'page' | 'size'>): Promise<TaskItem[]> {
+  const all: TaskItem[] = []
+  for (let page = 1; ; page += 1) {
+    const result = await tasksApi.fetchTasks({ ...query, page, size: 100 })
+    all.push(...result.list)
+    if (result.list.length === 0 || all.length >= result.total) return all
+  }
+}
+
+/** 独立于网络的归属/状态过滤，接口异常返回其他负责人的任务时也不展示。 */
+export function selectMyTasks(tasks: TaskItem[], userId?: string): TaskItem[] {
+  if (!userId) return []
+  return tasks.filter((task) => task.assigneeId === userId && task.status !== 'done')
+}
+
+export async function loadMyTasks(userId?: string): Promise<TaskItem[]> {
+  if (!userId) return []
+  return selectMyTasks(await fetchAllTasks({ assigneeId: userId }), userId)
+}
+
+export type TodoFilter = 'all' | 'overdue' | 'week'
+
+/** 本周到期指今天至本周日；已过日期由“我逾期的”筛选承接。 */
+export function filterMyTasks(tasks: TaskItem[], filter: TodoFilter, now = new Date()): TaskItem[] {
+  const current = today(now)
+  const sunday = new Date(now)
+  sunday.setDate(sunday.getDate() + ((7 - sunday.getDay()) % 7))
+  const end = today(sunday)
+  return tasks
+    .filter((task) => {
+      if (filter === 'overdue') return !!task.dueDate && task.dueDate < current
+      if (filter === 'week') return !!task.dueDate && task.dueDate >= current && task.dueDate <= end
+      return true
+    })
+    .sort((a, b) => {
+      if (!a.dueDate && !b.dueDate) return a.title.localeCompare(b.title)
+      if (!a.dueDate) return 1
+      if (!b.dueDate) return -1
+      return a.dueDate.localeCompare(b.dueDate) || a.title.localeCompare(b.title)
+    })
 }

@@ -3,7 +3,8 @@ import { computed, onMounted, ref } from 'vue'
 import { authApi, meetingsApi } from '@/api'
 import type { MeetingItem } from '@/api/meetings'
 import type { TaskItem as ApiTaskItem } from '@/api/tasks'
-import { loadOverview } from '@/utils/overview'
+import { filterMyTasks, isTaskOverdue, loadMyTasks, loadOverview } from '@/utils/overview'
+import type { TodoFilter } from '@/utils/overview'
 import { useUserStore } from '@/store/user'
 import router from '@/router'
 
@@ -32,60 +33,45 @@ const overdueTasks = ref(0)
 const overdueMilestones = ref(0)
 const recentMeetings = ref<MeetingItem[]>([])
 const myTasks = ref<ApiTaskItem[]>([])
-const todoFilter = ref<'all' | 'overdue' | 'week'>('all')
+const todoFilter = ref<TodoFilter>('all')
+const todosLoading = ref(true)
+const todosFailed = ref(false)
 const userStore = useUserStore()
 
-function localDate(date = new Date()): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
-    date.getDate()
-  ).padStart(2, '0')}`
-}
-
-function weekEnd(): string {
-  const date = new Date()
-  const daysUntilSunday = date.getDay() === 0 ? 0 : 7 - date.getDay()
-  date.setDate(date.getDate() + daysUntilSunday)
-  return localDate(date)
-}
-
-const filteredMyTasks = computed(() => {
-  const today = localDate()
-  const end = weekEnd()
-  return [...myTasks.value]
-    .filter((task) => {
-      if (todoFilter.value === 'overdue') return !!task.dueDate && task.dueDate < today
-      if (todoFilter.value === 'week') return !!task.dueDate && task.dueDate >= today && task.dueDate <= end
-      return true
-    })
-    .sort((a, b) => {
-      if (!a.dueDate && !b.dueDate) return a.title.localeCompare(b.title)
-      if (!a.dueDate) return 1
-      if (!b.dueDate) return -1
-      return a.dueDate.localeCompare(b.dueDate) || a.title.localeCompare(b.title)
-    })
-})
-
-function isOverdue(task: ApiTaskItem): boolean {
-  return !!task.dueDate && task.dueDate < localDate()
-}
+const filteredMyTasks = computed(() => filterMyTasks(myTasks.value, todoFilter.value))
 
 function openTaskBoard(task: ApiTaskItem): void {
   void router.push({ path: '/tasks', query: { projectId: task.projectId } })
 }
 
-onMounted(async () => {
+async function loadSummary(): Promise<void> {
+  try {
+    const snapshot = await loadOverview()
+    overdueTasks.value = snapshot.overdueTasks.length
+    overdueMilestones.value = snapshot.overdueMilestones.length
+  } catch {
+    // 汇总失败不影响其他卡片，也不依赖 /auth/me。
+  }
+}
+
+async function loadTodos(): Promise<void> {
+  todosLoading.value = true
+  todosFailed.value = false
   try {
     if (!userStore.userInfo) {
       const info = await authApi.fetchMe()
       userStore.setUserInfo(info)
     }
-    const snapshot = await loadOverview(userStore.userInfo?.id)
-    overdueTasks.value = snapshot.overdueTasks.length
-    overdueMilestones.value = snapshot.overdueMilestones.length
-    myTasks.value = snapshot.myTasks ?? []
+    myTasks.value = await loadMyTasks(userStore.userInfo?.id)
   } catch {
-    // 汇总失败不影响工作台其余内容；提醒条不展示
+    myTasks.value = []
+    todosFailed.value = true
+  } finally {
+    todosLoading.value = false
   }
+}
+
+async function loadMeetings(): Promise<void> {
   try {
     const now = Date.now()
     const week = now + 7 * 24 * 60 * 60 * 1000
@@ -113,6 +99,10 @@ onMounted(async () => {
   } catch {
     recentMeetings.value = []
   }
+}
+
+onMounted(async () => {
+  await Promise.all([loadSummary(), loadTodos(), loadMeetings()])
 })
 
 // 开工情况为人工维护的静态快照：依据 docs/09 任务分派表与 develop 合并记录，改状态请同步更新
@@ -237,14 +227,22 @@ const prerequisites = [
         <div class="todo-head">
           <span>我的待办</span>
           <el-radio-group v-model="todoFilter" size="small">
-            <el-radio-button label="all">全部</el-radio-button>
-            <el-radio-button label="overdue">我逾期的</el-radio-button>
-            <el-radio-button label="week">本周到期</el-radio-button>
+            <el-radio-button value="all">全部</el-radio-button>
+            <el-radio-button value="overdue">我逾期的</el-radio-button>
+            <el-radio-button value="week">本周到期</el-radio-button>
           </el-radio-group>
         </div>
       </template>
 
-      <el-empty v-if="filteredMyTasks.length === 0" description="当前筛选下没有待办任务" :image-size="60" />
+      <p v-if="todosLoading" role="status" class="tip-text">正在加载待办任务…</p>
+      <el-alert v-else-if="todosFailed" type="warning" :closable="false" title="待办加载失败">
+        <el-button text @click="loadTodos">重试</el-button>
+      </el-alert>
+      <el-empty
+        v-else-if="filteredMyTasks.length === 0"
+        description="当前筛选下没有待办任务"
+        :image-size="60"
+      />
       <button
         v-for="task in filteredMyTasks"
         :key="task.id"
@@ -254,8 +252,8 @@ const prerequisites = [
       >
         <span class="todo-title">{{ task.title }}</span>
         <span class="todo-project">{{ task.projectName }}</span>
-        <span v-if="task.dueDate" class="todo-due" :class="{ 'is-overdue': isOverdue(task) }">
-          {{ isOverdue(task) ? '已逾期 ' : '' }}{{ task.dueDate }}
+        <span v-if="task.dueDate" class="todo-due" :class="{ 'is-overdue': isTaskOverdue(task) }">
+          {{ isTaskOverdue(task) ? '已逾期 ' : '' }}{{ task.dueDate }}
         </span>
         <span v-else class="todo-due">未设置截止日期</span>
       </button>
