@@ -674,6 +674,33 @@ describe('ConversationsService.sendConversationMessage（文件消息）', () =>
     });
   });
 
+  /**
+   * 评审的用例缺口：引用**已逻辑删除**的附件。
+   *
+   * resolveOwnFile 的 where 带了 deleted: 0，所以逻辑删除的附件查不出来，
+   * 走到「附件不存在」→ 400。这里把它钉住——万一哪天有人把 deleted 条件去掉，
+   * 已删除的附件就能被重新挂到消息上。
+   */
+  it('引用已逻辑删除的附件 → 400（附件不存在）', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'group',
+      refId: null,
+    });
+    // deleted: 0 的查询查不到已删除的附件 → findFirst 返回 null
+    prisma.file.findFirst.mockResolvedValue(null);
+    await expect(
+      service.sendConversationMessage('1', '5', '附件', '8'),
+    ).rejects.toMatchObject({ code: 400, message: '附件不存在' });
+    // 关键：查附件时必须带上 deleted: 0
+    const fileQuery = prisma.file.findFirst.mock.calls[0][0] as {
+      where: { id: bigint; deleted: number };
+    };
+    expect(fileQuery.where.id).toBe(8n);
+    expect(fileQuery.where.deleted).toBe(0);
+  });
+
   it('不带 fileId → 普通文本消息，不写 file_id', async () => {
     const { service, prisma, tx } = createService();
     prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });

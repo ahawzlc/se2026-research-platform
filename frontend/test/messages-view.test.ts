@@ -233,6 +233,31 @@ describe('会议讨论区在消息页的只读处理（PR #51 评审）', () => 
     expect(conversationsApi.fetchMeetingDiscussionReadOnly).not.toHaveBeenCalled()
     expect(wrapper.find('.msg-input textarea').attributes('disabled')).toBeUndefined()
   })
+
+  /**
+   * 评审的用例缺口：`TYPE_META` 里去掉 `meeting` 没有用例拦。
+   *
+   * 去掉以后消息页渲染会议讨论区那一行会直接抛
+   * `Cannot read properties of undefined (reading 'tag')`——白屏。
+   * 这里钉住：会议讨论区这一行必须能渲染出类型标签。
+   */
+  it('会话类型为 meeting 时能渲染出类型标签（TYPE_META 必须含 meeting）', async () => {
+    conversationsApi.fetchConversations.mockResolvedValue({
+      list: [meetingConv],
+      total: 1
+    })
+    conversationsApi.fetchMeetingDiscussionReadOnly.mockResolvedValue({
+      readOnly: false,
+      reason: ''
+    })
+
+    const wrapper = await mountView()
+    await openFirstConversation(wrapper)
+
+    expect(wrapper.text()).toContain('会议讨论区')
+    // 类型标签渲染出来了，没有因为缺 key 而抛错
+    expect(wrapper.find('.conv-line .el-tag').exists()).toBe(true)
+  })
 })
 
 // ---------------------------------------------------------------- 孤儿文件
@@ -284,5 +309,43 @@ describe('发消息失败不产生孤儿文件（PR #51 评审）', () => {
       '带附件的消息',
       '500'
     )
+  })
+
+  /**
+   * 评审的用例缺口：选附件 → 上传 → 带 fileId 发消息这条链路没有组件用例。
+   *
+   * 这里钉住完整链路：选文件后上传一次，发消息时带上上传拿到的 fileId，
+   * 且发成功后才清掉 pendingFile / uploadedFileId。
+   */
+  it('选附件 → 上传 → 带 fileId 发消息（完整链路）', async () => {
+    const wrapper = await mountView()
+    await openFirstConversation(wrapper)
+
+    const upload = wrapper.findComponent({ name: 'ElUpload' })
+    const onChange = (upload.props() as Record<string, unknown>)['onChange'] as
+      | ((f: unknown) => void)
+      | undefined
+    onChange?.({ raw: new File(['内容'], '会议纪要.txt') })
+    await flushPromises()
+
+    const textarea = wrapper.find('.msg-input textarea')
+    await textarea.setValue('纪要在这里')
+    const sendBtn = wrapper.findAll('.msg-input button').find((b) => b.text().includes('发送'))
+    await sendBtn?.trigger('click')
+    await flushPromises()
+
+    // 上传一次，且用的是选中的那个文件
+    expect(fileApi.uploadFile).toHaveBeenCalledTimes(1)
+    const uploaded = fileApi.uploadFile.mock.calls[0][0] as File
+    expect(uploaded.name).toBe('会议纪要.txt')
+
+    // 发消息时带上了上传拿到的 fileId
+    expect(conversationsApi.sendMessage).toHaveBeenCalledWith('10', '纪要在这里', '500')
+
+    // 发成功后附件清掉（不会重复上传）
+    expect(wrapper.find('.msg-pending-file').exists()).toBe(false)
+    await sendBtn?.trigger('click')
+    await flushPromises()
+    expect(fileApi.uploadFile).toHaveBeenCalledTimes(1)
   })
 })

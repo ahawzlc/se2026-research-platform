@@ -355,4 +355,43 @@ describe('会议讨论区（T-2 / F-1）', () => {
       undefined
     )
   })
+
+  /**
+   * 评审的用例缺口：加载讨论区前不清上一场消息没有用例（对应 A6 串台）。
+   *
+   * 切到另一场会议时，上一场的消息必须**先清空**再加载，
+   * 否则在新会议详情里会短暂看到上一场的消息。
+   */
+  it('切换会议时先清空上一场的讨论消息', async () => {
+    conversationsApi.fetchMessages.mockResolvedValue([
+      {
+        id: '901',
+        conversationId: '20',
+        senderId: '2',
+        senderName: '别人',
+        content: 'A 会议里的话',
+        msgType: 'text',
+        createdAt: '2026-11-27 10:20:00'
+      }
+    ])
+
+    const wrapper = await mountView()
+    await openDetail(wrapper)
+    expect(wrapper.text()).toContain('A 会议里的话')
+
+    // 切到另一场会议，且新会议的消息**还在路上**
+    conversationsApi.fetchMessages.mockReturnValue(
+      new Promise(() => {
+        /* 永不 resolve，模拟慢响应 */
+      })
+    )
+    meetingsApi.fetchMeeting.mockResolvedValue({ ...MEETING, id: '8', title: 'B 会议' })
+    const buttons = wrapper.findAll('button')
+    const detailBtn = buttons.find((b) => b.text().includes('详情'))
+    await detailBtn?.trigger('click')
+    await flushPromises()
+
+    // A 会议的消息不该还留在页面上
+    expect(wrapper.text()).not.toContain('A 会议里的话')
+  })
 })
