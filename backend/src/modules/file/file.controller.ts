@@ -34,6 +34,11 @@ export class FileController {
   @UseInterceptors(
     FileInterceptor('file', {
       limits: { fileSize: INTERCEPTOR_MAX_SIZE_MB * 1024 * 1024 },
+      // 浏览器按 UTF-8 发送 multipart 的 filename，busboy 默认却按 latin1 解析，
+      // 于是中文名会被解成乱码（"纪要.txt" → "çºªè¦.txt"）——存进库的文件名是乱的，
+      // 下发给用户看到的也是乱的。busboy 1.6 支持 defParamCharset，从源头解决。
+      // （file.service 的 decodeOriginalName 保留作兜底：万一有客户端仍按 latin1 发送。）
+      defParamCharset: 'utf8',
     }),
   )
   upload(

@@ -364,19 +364,21 @@ export class ConversationsService {
   }
 
   /**
-   * 会议讨论区是否只读（会议已结束 → 只读）。
+   * 会议讨论区是否只读。
    *
    * 口径（2026-11-27 牵头人确认）：
    *   - **能看不能发**：历史消息作为会议存档可读，新参会人也能看；
    *   - 任何人（含新参会人）都不能再发言；
    *   - `unscheduled`（未填开始时间）**不算已结束**，讨论区照常可用。
    *
-   * @returns 已结束 → true（只读）；其余 → false（可发言）
+   * **会议被删除**时同样只读（评审意见）：会议都没了，讨论区不该还能发言。
+   *
+   * @returns readOnly=true 时附带 reason，前端据此给出不同的说明文案
    */
   async isMeetingDiscussionReadOnly(
     userId: string,
     idParam: string,
-  ): Promise<boolean> {
+  ): Promise<{ readOnly: boolean; reason: string }> {
     const conversationId = await this.requireMemberConversation(
       userId,
       idParam,
@@ -386,16 +388,19 @@ export class ConversationsService {
       select: { refId: true },
     });
     if (!conversation || conversation.refId === null) {
-      return false;
+      return { readOnly: false, reason: '' };
     }
     const meeting = await this.prisma.meeting.findFirst({
-      where: { id: conversation.refId, deleted: 0 },
-      select: { heldAt: true },
+      where: { id: conversation.refId },
+      select: { heldAt: true, deleted: true },
     });
-    if (!meeting) {
-      return false;
+    if (!meeting || (meeting.deleted ?? 0) !== 0) {
+      return { readOnly: true, reason: '会议已删除，讨论区只读' };
     }
-    return isMeetingEnded(meeting.heldAt);
+    if (isMeetingEnded(meeting.heldAt)) {
+      return { readOnly: true, reason: '会议已结束，讨论区只读' };
+    }
+    return { readOnly: false, reason: '' };
   }
 
   /**
@@ -699,12 +704,23 @@ export class ConversationsService {
     }
 
     // ① 会议讨论区只读
+    //
+    // 会议被**删除**（deleted=1）时讨论区同样只读——会议都没了，讨论区
+    // 不该还能继续发言。评审意见：删除后仍可发言。
     if (conversation.type === 'meeting' && conversation.refId !== null) {
       const meeting = await this.prisma.meeting.findFirst({
-        where: { id: conversation.refId, deleted: 0 },
-        select: { heldAt: true },
+        where: { id: conversation.refId },
+        select: { heldAt: true, deleted: true },
       });
-      if (meeting && isMeetingEnded(meeting.heldAt)) {
+      if (!meeting) {
+        // 会议行已不存在（异常数据）：不放行，交由上层处理
+        throw BizException.forbidden('会议已删除，讨论区只读，不能再发言');
+      }
+      // deleted 缺省成 0（正常），非 0 即已删除
+      if ((meeting.deleted ?? 0) !== 0) {
+        throw BizException.forbidden('会议已删除，讨论区只读，不能再发言');
+      }
+      if (isMeetingEnded(meeting.heldAt)) {
         throw BizException.forbidden('会议已结束，讨论区只读，不能再发言');
       }
     }

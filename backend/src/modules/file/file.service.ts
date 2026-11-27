@@ -13,12 +13,18 @@ import { DEFAULT_ALLOWED_EXT, DEFAULT_MAX_SIZE_MB } from './file.constants';
  *
  * **为什么需要**：浏览器按 UTF-8 发送 multipart 的 filename，
  * 但 multer/busboy 默认用 latin1 解析 header，
- * 于是中文名会被解成乱码（"纪要.txt" → "çºªè¦.txt"）。
- * 这不只是显示难看——**扩展名白名单校验会失效**：
- * `extname()` 取到的后缀也跟着乱，要么全拒、要么误判。
+ * 于是中文名会被解成乱码（"纪要.txt" → "çºªè¦.txt"）——
+ * **存进库的文件名是乱的，下发给用户看到的也是乱的**。
+ *
+ * 注意：乱码**不影响扩展名**——扩展名是 ASCII（`.txt`），latin1 解码不变，
+ * 所以扩展名白名单校验一直是有效的。此前文档里「乱码会让白名单失效」
+ * 的说法不准确，已更正。
  *
  * 做法：把 latin1 串**按字节**还原成 UTF-8。
  * 若还原结果含替换字符（说明原串本就不是「UTF-8 被误读成 latin1」），保持原样。
+ *
+ * 现在 controller 已用 `defParamCharset: 'utf8'` 从源头解决，
+ * 本函数作为**兜底**保留：万一有客户端仍按 latin1 发送，还能救回来。
  */
 export function decodeOriginalName(name: string): string {
   if (!name) return name;

@@ -51,17 +51,17 @@ export class ConversationsController {
   @Get('meeting/:id/readonly')
   @ApiOperation({
     summary:
-      '会议讨论区是否只读（线③ 卡 F-1；会议已结束 → true，前端据此禁用输入框）',
+      '会议讨论区是否只读（线③ 卡 F-1；会议已结束或已删除 → true，前端据此禁用输入框）',
   })
   async meetingReadOnly(
     @CurrentUser() user: CurrentUserPayload,
     @Param('id') id: string,
   ) {
-    const readOnly = await this.conversations.isMeetingDiscussionReadOnly(
+    const result = await this.conversations.isMeetingDiscussionReadOnly(
       user.userId,
       id,
     );
-    return { readOnly };
+    return result;
   }
 
   @Post('private')
