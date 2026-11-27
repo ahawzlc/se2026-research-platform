@@ -19,6 +19,19 @@ export class CreateGroupConversationDto {
   projectId!: string;
 }
 
+/**
+ * 创建/获取会议讨论区入参（线③ 卡 F-1）。
+ *
+ * 会话类型用 G-0 定稿的 `meeting`，refType/refId 指向会议；
+ * 表结构不因本卡改动。
+ */
+export class CreateMeetingConversationDto {
+  @ApiProperty({ description: '会议 id' })
+  @IsString()
+  @IsNotEmpty({ message: 'meetingId 不能为空' })
+  meetingId!: string;
+}
+
 /** 创建/获取私信会话入参 */
 export class CreatePrivateConversationDto {
   @ApiProperty({ description: '对方 userId' })
@@ -48,13 +61,36 @@ export class OpenPrivateConversationByUidDto {
   uid!: string;
 }
 
-/** 发消息入参 */
+/**
+ * 发消息入参。
+ *
+ * 附件（线③ 收尾，文件消息）：
+ *   - 带 `fileId` 时消息类型为 `file`，附件本体落在 `file` 表，
+ *     `content` 存一句说明（如「会议纪要」），**仍为必填**；
+ *   - 不带 `fileId` 时为普通文本消息；
+ *   - `content` 为空 → 400（无论带不带 `fileId`）。
+ *
+ * 说明：发附件**必须写一句说明**，前端「发送」按钮在正文为空时就是禁用的，
+ * 后端也强制校验，避免出现一个没有任何文字、只有附件的挂空消息。
+ *
+ * `fileId` 只能引用**自己**上传的附件，避免把别人的文件挂到自己的消息上。
+ */
 export class SendMessageDto {
   @ApiProperty({ description: '消息正文：1-2000 个字符' })
   @IsString()
   @IsNotEmpty({ message: '消息内容不能为空' })
   @MaxLength(2000, { message: '消息最长 2000 个字符' })
   content!: string;
+
+  @ApiPropertyOptional({
+    description: '附件 id（file.id）；带上后消息类型为 file',
+  })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty({ message: 'fileId 不能为空' })
+  @MaxLength(20, { message: 'fileId 最长 20 个字符' })
+  @Matches(/^\d+$/, { message: 'fileId 非法' })
+  fileId?: string;
 }
 
 /** 拉取消息查询参数 */

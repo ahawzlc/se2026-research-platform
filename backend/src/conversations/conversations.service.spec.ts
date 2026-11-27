@@ -10,6 +10,15 @@ interface MessageRow {
   msgType: string;
   createdAt: Date;
   sender: { username: string; nickname: string };
+  /** 附件快照（文件消息才有；附件被逻辑删除时后端不下发 file 字段） */
+  file?: {
+    id: bigint;
+    originalName: string;
+    url: string | null;
+    size: bigint;
+    mimeType: string | null;
+    deleted: number;
+  } | null;
 }
 
 function createService() {
@@ -45,9 +54,18 @@ function createService() {
       findFirst: jest.fn<Promise<unknown>, [unknown]>(),
       findMany: jest.fn<Promise<unknown[]>, [unknown]>(),
     },
+    meeting: {
+      findFirst: jest.fn<Promise<unknown>, [unknown]>(),
+    },
+    file: {
+      findFirst: jest.fn<Promise<unknown>, [unknown]>(),
+    },
     teamMember: {
       findFirst: jest.fn<Promise<unknown>, [unknown]>(),
       findMany: jest.fn<Promise<unknown[]>, [unknown]>(),
+    },
+    friendship: {
+      findFirst: jest.fn<Promise<unknown>, [unknown]>(),
     },
     user: {
       findFirst: jest.fn<Promise<unknown>, [unknown]>(),
@@ -288,5 +306,448 @@ describe('ConversationsService.listConversations', () => {
     const result = await service.listConversations('1', {});
     expect(result.list[0].title).toBe('C5 Verify Project');
     expect(prisma.conversationMember.findMany).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 线③ 卡 F-1：会议讨论区
+// ---------------------------------------------------------------------------
+
+describe('ConversationsService.ensureMeetingConversation', () => {
+  it('会议不存在 → 404', async () => {
+    const { service, prisma } = createService();
+    prisma.meeting.findFirst.mockResolvedValue(null);
+    await expect(
+      service.ensureMeetingConversation('1', { meetingId: '99' }),
+    ).rejects.toMatchObject({ code: 404, message: '会议不存在' });
+  });
+
+  it('会议所属项目已被逻辑删除 → 404', async () => {
+    const { service, prisma } = createService();
+    prisma.meeting.findFirst.mockResolvedValue({
+      id: 3n,
+      title: '需求评审',
+      project: { id: 1n, name: 'P', teamId: 7n, deleted: 1 },
+    });
+    await expect(
+      service.ensureMeetingConversation('1', { meetingId: '3' }),
+    ).rejects.toMatchObject({ code: 404 });
+  });
+
+  it('不是会议所属团队的成员 → 403', async () => {
+    const { service, prisma } = createService();
+    prisma.meeting.findFirst.mockResolvedValue({
+      id: 3n,
+      title: '需求评审',
+      project: { id: 1n, name: 'P', teamId: 7n, deleted: 0 },
+    });
+    prisma.teamMember.findFirst.mockResolvedValue(null);
+    await expect(
+      service.ensureMeetingConversation('1', { meetingId: '3' }),
+    ).rejects.toMatchObject({ code: 403 });
+  });
+
+  it('创建/获取 meeting 类型会话，refType/refId 指向会议，title 带会议名', async () => {
+    const { service, prisma } = createService();
+    prisma.meeting.findFirst.mockResolvedValue({
+      id: 3n,
+      title: '需求评审',
+      project: { id: 1n, name: 'P', teamId: 7n, deleted: 0 },
+    });
+    prisma.teamMember.findFirst.mockResolvedValue({
+      teamId: 7n,
+      userId: 1n,
+      role: 'member',
+    });
+    prisma.conversation.findFirst.mockResolvedValueOnce(null); // 尚无会话
+    prisma.conversation.create.mockResolvedValue({ id: 20n });
+    prisma.conversationMember.findFirst.mockResolvedValue(null);
+    prisma.conversationMember.create.mockResolvedValue({});
+    prisma.conversation.findFirst.mockResolvedValue({
+      id: 20n,
+      type: 'meeting',
+      title: '会议「需求评审」讨论区',
+      refType: 'meeting',
+      refId: 3n,
+      updatedAt: new Date('2026-11-27T10:00:00Z'),
+      members: [{ lastReadAt: null }],
+    });
+    prisma.message.findFirst.mockResolvedValue(null);
+    prisma.message.count.mockResolvedValue(0);
+
+    const result = await service.ensureMeetingConversation('1', {
+      meetingId: '3',
+    });
+    expect(result.id).toBe('20');
+    expect(result.type).toBe('meeting');
+
+    const createCalls = prisma.conversation.create.mock
+      .calls as unknown as Array<
+      [
+        {
+          data: { type: string; refType: string; refId: bigint; title: string };
+        },
+      ]
+    >;
+    expect(createCalls[0][0].data.type).toBe('meeting');
+    expect(createCalls[0][0].data.refType).toBe('meeting');
+    expect(createCalls[0][0].data.refId).toBe(3n);
+  });
+});
+
+describe('ConversationsService.assertMessageAllowed（会议讨论区只读）', () => {
+  /** 构造一个已结束的会议（开始时间在 3 小时前，超过 120 分钟窗口） */
+  const endedMeeting = {
+    heldAt: new Date(Date.now() - 3 * 60 * 60 * 1000),
+  };
+
+  it('会议已结束 → 403（讨论区只读）', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    prisma.meeting.findFirst.mockResolvedValue(endedMeeting);
+
+    await expect(
+      service.sendConversationMessage('1', '5', '还能说吗'),
+    ).rejects.toMatchObject({
+      code: 403,
+      message: '会议已结束，讨论区只读，不能再发言',
+    });
+  });
+
+  it('会议进行中 → 允许发言', async () => {
+    const { service, prisma, tx } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    prisma.meeting.findFirst.mockResolvedValue({
+      heldAt: new Date(Date.now() - 10 * 60 * 1000),
+    });
+    tx.message.create.mockResolvedValue({
+      id: 100n,
+      conversationId: 5n,
+      senderId: 1n,
+      content: '还能说',
+      msgType: 'text',
+      createdAt: new Date('2026-11-27T10:00:00Z'),
+      sender: { username: 'zhangsan', nickname: '张三' },
+    });
+
+    const result = await service.sendConversationMessage('1', '5', '还能说');
+    expect(result.id).toBe('100');
+  });
+
+  it('会议未排期（heldAt 为空）→ 不算结束，可发言', async () => {
+    const { service, prisma, tx } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    prisma.meeting.findFirst.mockResolvedValue({ heldAt: null });
+    tx.message.create.mockResolvedValue({
+      id: 101n,
+      conversationId: 5n,
+      senderId: 1n,
+      content: '待定会议也能聊',
+      msgType: 'text',
+      createdAt: new Date('2026-11-27T10:00:00Z'),
+      sender: { username: 'zhangsan', nickname: '张三' },
+    });
+
+    const result = await service.sendConversationMessage(
+      '1',
+      '5',
+      '待定会议也能聊',
+    );
+    expect(result.id).toBe('101');
+  });
+
+  it('private 会话不受会议只读规则影响（不查 meeting 表）', async () => {
+    const { service, prisma, tx } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'private',
+      refId: null,
+    });
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.message.count.mockResolvedValue(0); // 该方向还没发过 → 不限流
+    tx.message.create.mockResolvedValue({
+      id: 102n,
+      conversationId: 5n,
+      senderId: 1n,
+      content: '私信照常',
+      msgType: 'text',
+      createdAt: new Date('2026-11-27T10:00:00Z'),
+      sender: { username: 'zhangsan', nickname: '张三' },
+    });
+
+    const result = await service.sendConversationMessage('1', '5', '私信照常');
+    expect(result.id).toBe('102');
+    expect(prisma.meeting.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('会议已被删除 → 403（讨论区只读，评审意见）', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    // 已删除但**未结束**（开始时间就在刚才）——最能说明问题的一组：
+    // 只看「是否结束」的话，这里会被放行。
+    prisma.meeting.findFirst.mockResolvedValue({
+      heldAt: new Date(),
+      deleted: 1,
+    });
+
+    await expect(
+      service.sendConversationMessage('1', '5', '会议没了还能说吗'),
+    ).rejects.toMatchObject({
+      code: 403,
+      message: '会议已删除，讨论区只读，不能再发言',
+    });
+  });
+
+  it('会议行已不存在 → 403（不放行）', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    prisma.meeting.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.sendConversationMessage('1', '5', '幽灵会议'),
+    ).rejects.toMatchObject({ code: 403 });
+  });
+});
+
+describe('ConversationsService.isMeetingDiscussionReadOnly', () => {
+  it('会议已结束 → 只读，并给出原因', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    prisma.meeting.findFirst.mockResolvedValue({
+      heldAt: new Date(Date.now() - 3 * 60 * 60 * 1000),
+      deleted: 0,
+    });
+
+    const result = await service.isMeetingDiscussionReadOnly('1', '5');
+    expect(result.readOnly).toBe(true);
+    expect(result.reason).toBe('会议已结束，讨论区只读');
+  });
+
+  it('会议已删除 → 只读，原因与「已结束」不同', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    prisma.meeting.findFirst.mockResolvedValue({
+      heldAt: new Date(),
+      deleted: 1,
+    });
+
+    const result = await service.isMeetingDiscussionReadOnly('1', '5');
+    expect(result.readOnly).toBe(true);
+    expect(result.reason).toBe('会议已删除，讨论区只读');
+  });
+
+  it('会议未结束 → 可发言（readOnly=false，reason 为空）', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    prisma.meeting.findFirst.mockResolvedValue({
+      heldAt: new Date(),
+      deleted: 0,
+    });
+
+    const result = await service.isMeetingDiscussionReadOnly('1', '5');
+    expect(result.readOnly).toBe(false);
+    expect(result.reason).toBe('');
+  });
+
+  it('会议未排期 → 可发言', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    prisma.meeting.findFirst.mockResolvedValue({ heldAt: null, deleted: 0 });
+
+    const result = await service.isMeetingDiscussionReadOnly('1', '5');
+    expect(result.readOnly).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 线③ 收尾：文件消息
+// ---------------------------------------------------------------------------
+
+describe('ConversationsService.sendConversationMessage（文件消息）', () => {
+  it('带 fileId → msgType 为 file，并写 file_id', async () => {
+    const { service, prisma, tx } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'group',
+      refId: null,
+    });
+    prisma.file.findFirst.mockResolvedValue({ id: 8n, uploaderId: 1n });
+    tx.message.create.mockResolvedValue({
+      id: 200n,
+      conversationId: 5n,
+      senderId: 1n,
+      content: '会议纪要',
+      msgType: 'file',
+      createdAt: new Date('2026-11-27T10:00:00Z'),
+      sender: { username: 'zhangsan', nickname: '张三' },
+      file: {
+        id: 8n,
+        originalName: '纪要.pdf',
+        url: '/api/v1/files/2026/11/27/abc.pdf',
+        size: 1024n,
+        mimeType: 'application/pdf',
+        deleted: 0,
+      },
+    });
+
+    const result = await service.sendConversationMessage(
+      '1',
+      '5',
+      '会议纪要',
+      '8',
+    );
+
+    expect(result.msgType).toBe('file');
+    expect(result.file?.originalName).toBe('纪要.pdf');
+    expect(result.file?.url).toBe('/api/v1/files/2026/11/27/abc.pdf');
+    expect(result.file?.size).toBe('1024');
+
+    const createCalls = tx.message.create.mock.calls as unknown as Array<
+      [{ data: { msgType: string; fileId?: bigint } }]
+    >;
+    expect(createCalls[0][0].data.msgType).toBe('file');
+    expect(createCalls[0][0].data.fileId).toBe(8n);
+  });
+
+  it('附件不存在 → 400', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'group',
+      refId: null,
+    });
+    prisma.file.findFirst.mockResolvedValue(null);
+    await expect(
+      service.sendConversationMessage('1', '5', '附件', '8'),
+    ).rejects.toMatchObject({ code: 400, message: '附件不存在' });
+  });
+
+  it('引用他人上传的附件 → 403', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'group',
+      refId: null,
+    });
+    prisma.file.findFirst.mockResolvedValue({ id: 8n, uploaderId: 99n });
+    await expect(
+      service.sendConversationMessage('1', '5', '附件', '8'),
+    ).rejects.toMatchObject({
+      code: 403,
+      message: '只能发送自己上传的附件',
+    });
+  });
+
+  /**
+   * 评审的用例缺口：引用**已逻辑删除**的附件。
+   *
+   * resolveOwnFile 的 where 带了 deleted: 0，所以逻辑删除的附件查不出来，
+   * 走到「附件不存在」→ 400。这里把它钉住——万一哪天有人把 deleted 条件去掉，
+   * 已删除的附件就能被重新挂到消息上。
+   */
+  it('引用已逻辑删除的附件 → 400（附件不存在）', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'group',
+      refId: null,
+    });
+    // deleted: 0 的查询查不到已删除的附件 → findFirst 返回 null
+    prisma.file.findFirst.mockResolvedValue(null);
+    await expect(
+      service.sendConversationMessage('1', '5', '附件', '8'),
+    ).rejects.toMatchObject({ code: 400, message: '附件不存在' });
+    // 关键：查附件时必须带上 deleted: 0
+    const fileQuery = prisma.file.findFirst.mock.calls[0][0] as {
+      where: { id: bigint; deleted: number };
+    };
+    expect(fileQuery.where.id).toBe(8n);
+    expect(fileQuery.where.deleted).toBe(0);
+  });
+
+  it('不带 fileId → 普通文本消息，不写 file_id', async () => {
+    const { service, prisma, tx } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'group',
+      refId: null,
+    });
+    tx.message.create.mockResolvedValue({
+      id: 201n,
+      conversationId: 5n,
+      senderId: 1n,
+      content: '纯文本',
+      msgType: 'text',
+      createdAt: new Date('2026-11-27T10:00:00Z'),
+      sender: { username: 'zhangsan', nickname: '张三' },
+    });
+
+    const result = await service.sendConversationMessage('1', '5', '纯文本');
+    expect(result.msgType).toBe('text');
+    expect(result.file).toBeUndefined();
+    expect(prisma.file.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('附件被逻辑删除 → 不返回 file 字段（前端降级为纯文本，不给死链）', async () => {
+    const { service, prisma } = createService();
+    prisma.message.findMany.mockResolvedValue([
+      {
+        id: 300n,
+        conversationId: 5n,
+        senderId: 1n,
+        content: '已删除的附件',
+        msgType: 'file',
+        createdAt: new Date('2026-11-27T10:00:00Z'),
+        sender: { username: 'zhangsan', nickname: '张三' },
+        file: {
+          id: 8n,
+          originalName: '纪要.pdf',
+          url: '/api/v1/files/2026/11/27/abc.pdf',
+          size: 1024n,
+          mimeType: 'application/pdf',
+          deleted: 1,
+        },
+      },
+    ]);
+
+    const result = await service.listMessages(5n, 50);
+    expect(result[0].msgType).toBe('file');
+    expect(result[0].file).toBeUndefined();
   });
 });

@@ -310,8 +310,9 @@ CREATE TABLE `message` (
   `id`              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
   `conversation_id` BIGINT UNSIGNED NOT NULL                COMMENT 'conversation.id',
   `sender_id`       BIGINT UNSIGNED NOT NULL                COMMENT '发送人 user.id',
-  `content`         TEXT            NULL                    COMMENT '消息正文',
+  `content`         TEXT            NULL                    COMMENT '消息正文（msg_type = file 时存文件标识说明）',
   `msg_type`        VARCHAR(20)     NOT NULL DEFAULT 'text' COMMENT '消息类型：text / file / system',
+  `file_id`         BIGINT UNSIGNED NULL                    COMMENT '附件 file.id（msg_type = file 时非空）',
   `ref_type`        VARCHAR(30)     NULL                    COMMENT '消息级引用的对象类型',
   `ref_id`          BIGINT UNSIGNED NULL                    COMMENT '消息级引用的对象主键',
   `created_at`      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -319,8 +320,10 @@ CREATE TABLE `message` (
   PRIMARY KEY (`id`),
   KEY `idx_message_conversation` (`conversation_id`, `id`),
   KEY `message_sender_id_fkey` (`sender_id`),
+  KEY `idx_message_file` (`file_id`),
   CONSTRAINT `message_conversation_id_fkey` FOREIGN KEY (`conversation_id`) REFERENCES `conversation` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
-  CONSTRAINT `message_sender_id_fkey` FOREIGN KEY (`sender_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
+  CONSTRAINT `message_sender_id_fkey` FOREIGN KEY (`sender_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `message_file_id_fkey` FOREIGN KEY (`file_id`) REFERENCES `file` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息';
 
 -- ==============================================================================

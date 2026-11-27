@@ -11,6 +11,7 @@ import {
   requireId,
   requireTeamMembership,
 } from '../common/team-access';
+import { deriveMeetingStatus } from '../common/meeting-status';
 import type { CreateMeetingDto, UpdateMeetingDto } from './dto/meeting.dto';
 import type { ListMeetingsQueryDto } from './dto/meeting-query.dto';
 
@@ -50,9 +51,6 @@ export interface PageData<T> {
 
 /** 参会人上限：组规模小，50 足够，防止一次请求塞爆 */
 const MAX_ATTENDEES = 50;
-
-/** 会议表没有结束时间，按默认 120 分钟估算；不代表真实结束或签到状态。 */
-const ONGOING_WINDOW_MINUTES = 120;
 
 /**
  * 会议服务（任务卡 C-2）。
@@ -441,16 +439,7 @@ export class MeetingsService {
       };
     }[];
   }): MeetingItem {
-    const now = Date.now();
-    const startsAt = row.heldAt?.getTime();
-    const status: MeetingItem['status'] =
-      startsAt === undefined
-        ? 'unscheduled'
-        : startsAt > now
-          ? 'upcoming'
-          : now < startsAt + ONGOING_WINDOW_MINUTES * 60_000
-            ? 'ongoing'
-            : 'ended';
+    const status = deriveMeetingStatus(row.heldAt);
     return {
       id: toIdString(row.id),
       projectId: toIdString(row.projectId),

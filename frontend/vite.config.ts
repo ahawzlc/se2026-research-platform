@@ -15,7 +15,7 @@ export default defineConfig({
     proxy: {
       '/api': {
         // 后端端口为前后端约定值，定稿后如需变更请同步通知全组
-        target: 'http://localhost:8080',
+        target: process.env.VITE_PROXY_TARGET || 'http://localhost:8080',
         changeOrigin: true
       }
     }

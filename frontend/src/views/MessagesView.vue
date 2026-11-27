@@ -1,17 +1,19 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { authApi, conversationsApi, projectsApi, teamsApi } from '@/api'
+import { authApi, conversationsApi, fileApi, projectsApi, teamsApi } from '@/api'
 import type { ConversationItem, ConversationType, MessageItem } from '@/api/conversations'
 import type { ProjectItem } from '@/api/projects'
 import type { TeamMemberItem } from '@/api/teams'
 import { useUserStore } from '@/store/user'
+import { formatFileSize } from '@/utils/display'
 
 /** 会话类型中文名与标签配色（comment 为 B-3 任务评论复用的锚定会话，零未读） */
-const TYPE_META: Record<ConversationType, { label: string; tag: 'info' | 'success' | 'warning' }> = {
-  comment: { label: '任务评论', tag: 'info' },
-  group: { label: '项目讨论区', tag: 'success' },
-  private: { label: '私信', tag: 'warning' }
+const TYPE_META: Record<ConversationType, { label: string; tag: 'info' | 'success' | 'warning' | 'danger' }> = {
+    comment: { label: '任务评论', tag: 'info' },
+    group: { label: '项目讨论区', tag: 'success' },
+    private: { label: '私信', tag: 'warning' },
+    meeting: { label: '会议讨论区', tag: 'danger' }
 }
 
 /** 未读轮询间隔：SRS 口径 30 秒（docs/01 已废弃旧 3–5 秒） */
@@ -35,7 +37,9 @@ const activeConversation = computed(() =>
 async function loadConversations(): Promise<void> {
   listLoading.value = true
   try {
-    const result = await conversationsApi.fetchConversations({ page: 1, size: 50 })
+    // size 给足：会话列表**只取第 1 页**，条数不够时新会话会看不到。
+    // ⚠️ 上限是 100（后端 DTO 的 @Max(100)），超了会被 400 拒掉、列表直接空。
+    const result = await conversationsApi.fetchConversations({ page: 1, size: 100 })
     conversations.value = result.list
     // 列表刷新后当前会话可能更新（预览/时间），消息区不动
   } finally {
@@ -69,11 +73,46 @@ const draft = ref('')
 const sending = ref(false)
 const scrollRef = ref<HTMLElement>()
 
+/**
+ * 当前会话是否只读。
+ *
+ * 只有**会议讨论区**可能是只读的（会议已结束或已删除）。
+ * 消息页不查这个接口的话，用户在这里选附件 → 写说明 → 回车，
+ * 会先上传成功（201）再被发消息接口拒掉（403），
+ * file 表里就多一行没人引用的孤儿文件——按一次多一行。
+ */
+const activeReadOnly = ref(false)
+const activeReadOnlyReason = ref('')
+
+/**
+ * 查询会话是否只读。
+ *
+ * 非会议会话恒为 false，不发请求。
+ */
+async function fetchReadOnly(conv: ConversationItem): Promise<void> {
+  if (conv.type !== 'meeting') {
+    activeReadOnly.value = false
+    activeReadOnlyReason.value = ''
+    return
+  }
+  try {
+    const ro = await conversationsApi.fetchMeetingDiscussionReadOnly(conv.id)
+    activeReadOnly.value = ro.readOnly
+    activeReadOnlyReason.value = ro.reason
+  } catch {
+    // 查不到只读状态时保守处理：不锁死输入框（后端发消息时还会再拦一次）
+    activeReadOnly.value = false
+    activeReadOnlyReason.value = ''
+  }
+}
+
 async function openConversation(conv: ConversationItem): Promise<void> {
   if (activeId.value === conv.id) return
   activeId.value = conv.id
   messagesLoading.value = true
   messages.value = []
+  activeReadOnly.value = false
+  activeReadOnlyReason.value = ''
   try {
     messages.value = await conversationsApi.fetchMessages(conv.id, 200)
     await scrollToBottom()
@@ -87,16 +126,32 @@ async function openConversation(conv: ConversationItem): Promise<void> {
       // 已读失败不阻塞浏览；下次轮询会纠正未读数
     })
   }
+  // 查只读状态（只有会议讨论区可能只读）
+  await fetchReadOnly(conv)
 }
 
 async function handleSend(): Promise<void> {
   const content = draft.value.trim()
   if (!content || !activeId.value || sending.value) return
+  if (activeReadOnly.value) return
   sending.value = true
   try {
-    const message = await conversationsApi.sendMessage(activeId.value, content)
+    // 有附件时先传文件拿到 fileId，再带 fileId 发消息（两段式）。
+    //
+    // 上传成功但发消息失败时**保留 uploadedFileId** 供重试：
+    // 若每次重试都重新上传，file 表里会堆一堆没人引用的孤儿文件。
+    let fileId = uploadedFileId.value
+    if (!fileId && pendingFile.value) {
+      const uploaded = await fileApi.uploadFile(pendingFile.value)
+      fileId = uploaded.id
+      // 先记下来：万一发消息失败，重试时直接复用这个已上传的附件
+      uploadedFileId.value = uploaded.id
+    }
+    const message = await conversationsApi.sendMessage(activeId.value, content, fileId)
     messages.value.push(message)
     draft.value = ''
+    pendingFile.value = undefined
+    uploadedFileId.value = undefined
     await scrollToBottom()
     // 同步左侧预览（消息零埋点，无需其他联动）
     const conv = conversations.value.find((c) => c.id === activeId.value)
@@ -105,10 +160,52 @@ async function handleSend(): Promise<void> {
       conv.lastMessageAt = message.createdAt
     }
   } catch {
-    // 提示由拦截器统一处理
+    // 提示由拦截器统一处理。
+    // 失败时保留 pendingFile / uploadedFileId，用户可以直接重试，不会重复上传。
   } finally {
     sending.value = false
   }
+}
+
+/**
+ * 待发送的附件（线③ 收尾）。
+ *
+ * 只在内存里暂存，**不上传即选中**——避免用户选了个文件又取消，
+ * 服务器上却留下一条没人引用的 file 记录（孤儿文件）。
+ * 真正的上传发生在点「发送」那一刻。
+ */
+const pendingFile = ref<File | undefined>()
+
+/**
+ * 已上传但还没发出去的附件 id。
+ *
+ * 上传与发消息是两段式，中间可能失败（403 只读、403 非好友限发等）。
+ * 记下已上传的 id，重试时直接复用，不重新上传——否则每次重试都往
+ * file 表塞一行没人引用的孤儿记录。
+ */
+const uploadedFileId = ref<string | undefined>()
+
+/** 上传组件实例：选中后立刻清空内部列表，才能重复选同一个文件 */
+const uploadRef = ref<{ clearFiles: () => void } | undefined>()
+
+/**
+ * 附件选择回调。
+ *
+ * `on-change` 在 auto-upload=false 时于「选中文件」时触发，
+ * 原始 File 对象在 `raw` 里（`uploadFile` 是 el-upload 的包装对象，不是浏览器 File）。
+ */
+function handleFileChange(uploadFile: { raw?: File }): void {
+  pendingFile.value = uploadFile.raw
+  // 换了新附件，之前那个已上传的 id 就不再适用了
+  uploadedFileId.value = undefined
+  // 清空内部列表：否则第二次选同一文件会被 limit 拦下
+  uploadRef.value?.clearFiles()
+}
+
+/** 移除待发送的附件（连同已上传的 id） */
+function handleFileRemove(): void {
+  pendingFile.value = undefined
+  uploadedFileId.value = undefined
 }
 
 async function scrollToBottom(): Promise<void> {
@@ -341,23 +438,66 @@ onBeforeUnmount(() => {
             <div class="msg-bubble">
               <div v-if="msg.senderId !== myUserId" class="msg-sender">{{ msg.senderName }}</div>
               <div class="msg-content">{{ msg.content }}</div>
+              <!-- 文件消息（线③ 收尾）：附件卡片；附件被删除时后端不下发 file，降级为纯文本 -->
+              <a
+                v-if="msg.msgType === 'file' && msg.file"
+                class="msg-file"
+                :href="msg.file.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                :download="msg.file.originalName"
+              >
+                <span class="msg-file-icon" aria-hidden="true">📎</span>
+                <span class="msg-file-name">{{ msg.file.originalName }}</span>
+                <span class="msg-file-size">{{ formatFileSize(msg.file.size) }}</span>
+              </a>
               <div class="msg-time">{{ msg.createdAt }}</div>
             </div>
           </div>
         </div>
         <div class="msg-input">
+          <!-- 只读会话（会议已结束/已删除）：禁用输入框并说明原因。
+               不这样做的话，用户在这里选附件 → 回车，会先上传成功再被 403 拒掉，
+               file 表里多一行没人引用的孤儿文件。 -->
+          <p v-if="activeReadOnly" class="msg-readonly-hint">
+            {{ activeReadOnlyReason || '该讨论区只读，不能发言' }}
+          </p>
+          <!-- 待发送的附件（线③ 收尾）：显示在输入框上方，点发送才真正上传 -->
+          <div v-if="pendingFile" class="msg-pending-file">
+            <span class="msg-file-icon" aria-hidden="true">📎</span>
+            <span class="msg-file-name">{{ pendingFile.name }}</span>
+            <span class="msg-file-size">{{ formatFileSize(pendingFile.size) }}</span>
+            <el-button link type="danger" @click="handleFileRemove">移除</el-button>
+          </div>
           <el-input
             v-model="draft"
             type="textarea"
             :rows="2"
             maxlength="2000"
-            placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+            :disabled="activeReadOnly"
+            :placeholder="
+              activeReadOnly
+                ? activeReadOnlyReason || '该讨论区只读，不能发言'
+                : '输入消息，Enter 发送，Shift+Enter 换行'
+            "
             @keydown.enter.exact.prevent="handleSend"
           />
+          <el-upload
+            ref="uploadRef"
+            class="msg-upload"
+            :auto-upload="false"
+            :show-file-list="false"
+            :on-change="handleFileChange"
+          >
+            <el-button :disabled="!activeId || activeReadOnly">
+              <span aria-hidden="true">📎</span>
+              <span class="msg-upload-text">附件</span>
+            </el-button>
+          </el-upload>
           <el-button
             type="primary"
             :loading="sending"
-            :disabled="!draft.trim() || !activeId"
+            :disabled="!draft.trim() || !activeId || activeReadOnly"
             @click="handleSend"
           >
             发送
@@ -604,6 +744,66 @@ onBeforeUnmount(() => {
   word-break: break-word;
 }
 
+/* 附件卡片（线③ 收尾） */
+.msg-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: #ffffff;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  color: #409eff;
+  text-decoration: none;
+  font-size: 13px;
+  max-width: 100%;
+}
+
+.msg-file:hover {
+  border-color: #409eff;
+}
+
+.msg-file-icon {
+  font-size: 14px;
+}
+
+.msg-file-name {
+  color: #303133;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.msg-file-size {
+  color: #909399;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* 待发送的附件（选中但还没上传） */
+.msg-pending-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+/* 只读会话的说明（线③ PR #51 评审） */
+.msg-readonly-hint {
+  margin: 0 0 2px;
+  width: 100%;
+  color: #909399;
+  font-size: 12px;
+}
+
+.msg-pending-file .msg-file-name {
+  color: #303133;
+}
+
 .msg-time {
   margin-top: 2px;
   font-size: 11px;
@@ -617,6 +817,11 @@ onBeforeUnmount(() => {
   padding: 10px 12px;
   border-top: 1px solid #f0f0f0;
   align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.msg-upload-text {
+  margin-left: 4px;
 }
 
 .chat-empty {

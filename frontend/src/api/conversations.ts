@@ -7,7 +7,7 @@ import { http } from './request'
 import type { PageQuery, PageResult } from './types'
 
 /** 会话类型（docs/02 conversation.type） */
-export type ConversationType = 'comment' | 'group' | 'private'
+export type ConversationType = 'comment' | 'group' | 'private' | 'meeting'
 
 /** 会话条目（含最后一条消息预览与未读数） */
 export interface ConversationItem {
@@ -32,6 +32,15 @@ export interface MessageItem {
   senderName: string
   content: string
   msgType: string
+  /** 附件（msgType=file 时有值）；附件被删除后后端不下发此字段 */
+  file?: {
+    id: string
+    originalName: string
+    url: string
+    /** 字节数，后端 BIGINT 序列化后为字符串 */
+    size: string
+    mimeType: string
+  }
   createdAt: string
 }
 
@@ -49,6 +58,22 @@ export function fetchConversations(query?: PageQuery & { type?: ConversationType
 /** 创建/获取项目讨论区（一个项目一个 group 会话） */
 export function ensureGroupConversation(projectId: string) {
   return http.post<ConversationItem>('/api/v1/conversations/group', { projectId })
+}
+
+/** 创建/获取会议讨论区（线③ 卡 F-1；一个会议一个 meeting 会话） */
+export function ensureMeetingConversation(meetingId: string) {
+  return http.post<ConversationItem>('/api/v1/conversations/meeting', { meetingId })
+}
+
+/**
+ * 会议讨论区是否只读（会议已结束或已删除 → true，前端据此禁用输入框）
+ *
+ * reason 用于给用户不同的说明文案（已结束 / 已删除），空串表示可发言。
+ */
+export function fetchMeetingDiscussionReadOnly(conversationId: string) {
+  return http.get<{ readOnly: boolean; reason: string }>(
+    `/api/v1/conversations/meeting/${conversationId}/readonly`
+  )
 }
 
 /** 创建/获取私信会话（线③ 卡 E-3：不再要求同组；非好友每方向限发 1 条） */
@@ -74,9 +99,17 @@ export function fetchMessages(id: string, limit = 50) {
   return http.get<MessageItem[]>(`/api/v1/conversations/${id}/messages`, { params: { limit } })
 }
 
-/** 发送消息（content 1–2000 字符；零埋点） */
-export function sendMessage(id: string, content: string) {
-  return http.post<MessageItem>(`/api/v1/conversations/${id}/messages`, { content })
+/**
+ * 发送消息（content 1–2000 字符；零埋点）
+ *
+ * 带 `fileId` 时为**文件消息**（线③ 收尾）：附件本体在 file 表，
+ * content 存一句说明（如「会议纪要」）。fileId 必须是**自己**上传的附件。
+ */
+export function sendMessage(id: string, content: string, fileId?: string) {
+  return http.post<MessageItem>(`/api/v1/conversations/${id}/messages`, {
+    content,
+    ...(fileId ? { fileId } : {})
+  })
 }
 
 /** 未读消息汇总（前端 30s 轮询） */

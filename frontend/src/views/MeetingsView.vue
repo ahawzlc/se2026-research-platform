@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
-import { meetingsApi, projectsApi, teamsApi } from '@/api'
+import { conversationsApi, fileApi, meetingsApi, projectsApi, teamsApi } from '@/api'
 import type { MeetingItem } from '@/api/meetings'
+import type { MessageItem } from '@/api/conversations'
 import type { ProjectItem } from '@/api/projects'
 import type { TeamMemberItem } from '@/api/teams'
+import { formatFileSize } from '@/utils/display'
 
 const route = useRoute()
 const router = useRouter()
@@ -91,6 +93,205 @@ const rules: FormRules = {
 const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detail = ref<MeetingItem | null>(null)
+
+// ---------------------------------------------------------------- 讨论区（F-1）
+
+/**
+ * 会议讨论区（线③ 卡 F-1）。
+ *
+ * 会话模型：`Conversation.type = meeting`，refType/refId 指向会议
+ * （G-0 已定稿的枚举值，本卡不改表结构）。
+ *
+ * 只读口径（2026-11-27 牵头人确认）：会议已结束后讨论区**能看不能发**——
+ * 历史消息作为会议存档可读，新参会人也能看，但任何人都不再能发言。
+ * 「未排期」（未填开始时间）不算结束，照常可发。
+ */
+const discussionConversationId = ref('')
+const discussionMessages = ref<MessageItem[]>([])
+const discussionLoading = ref(false)
+const discussionReadOnly = ref(false)
+/** 只读原因（已结束 / 已删除），用于给用户不同的说明文案 */
+const discussionReadOnlyReason = ref('')
+/** 讨论区加载是否失败——与「还没有人发言」区分开，否则用户会误以为是空会话 */
+const discussionLoadFailed = ref(false)
+const discussionDraft = ref('')
+const discussionSending = ref(false)
+const discussionScrollRef = ref<HTMLElement>()
+
+/** 讨论区轮询间隔：卡面口径 30 秒 */
+const DISCUSSION_POLL_INTERVAL_MS = 30_000
+
+let discussionTimer: ReturnType<typeof setInterval> | null = null
+/** loadDiscussion 的请求序号：快速切换会议时用来丢弃过期的响应（避免串台） */
+let discussionRequest = 0
+
+/**
+ * 用户是否把消息区往上翻过。
+ *
+ * 轮询拉到新消息时，只有「用户没往上翻」才自动滚到底部——
+ * 否则会打断正在回看历史消息的人。
+ */
+const discussionPinnedToBottom = ref(true)
+
+function handleDiscussionScroll(): void {
+  const el = discussionScrollRef.value
+  if (!el) return
+  // 距底部 40px 以内视为「贴着底部」
+  discussionPinnedToBottom.value =
+    el.scrollHeight - el.scrollTop - el.clientHeight <= 40
+}
+
+/**
+ * 打开会议详情后加载讨论区（失败不阻断详情展示）。
+ *
+ * 带请求序号保护：快速切换会议时，先发的请求可能后到，
+ * 若不比对序号，A 会议的响应会覆盖 B 会议的讨论区（串台），
+ * 而且发言会发到 B 的会话里。
+ */
+async function loadDiscussion(meetingId: string): Promise<void> {
+  const request = ++discussionRequest
+  discussionMessages.value = []
+  discussionConversationId.value = ''
+  discussionReadOnly.value = false
+  discussionReadOnlyReason.value = ''
+  discussionLoadFailed.value = false
+  discussionLoading.value = true
+  discussionPinnedToBottom.value = true
+  try {
+    const conv = await conversationsApi.ensureMeetingConversation(meetingId)
+    if (request !== discussionRequest) return
+    discussionConversationId.value = conv.id
+    const list = await conversationsApi.fetchMessages(conv.id, 200)
+    if (request !== discussionRequest) return
+    discussionMessages.value = list
+    const ro = await conversationsApi.fetchMeetingDiscussionReadOnly(conv.id)
+    if (request !== discussionRequest) return
+    discussionReadOnly.value = ro.readOnly
+    discussionReadOnlyReason.value = ro.reason
+    // 看过讨论区就算已读：否则消息页角标一直挂着未读数
+    await conversationsApi.markRead(conv.id).catch(() => {
+      // 已读失败不阻断浏览；下次进入会话会再标一次
+    })
+    if (request !== discussionRequest) return
+    await scrollDiscussionToBottom()
+    // 未结束的会议开始 30 秒轮询；已结束/已删除的是只读存档，不会再有新消息
+    if (request === discussionRequest && !discussionReadOnly.value) {
+      startDiscussionPolling()
+    }
+  } catch {
+    // 请求拦截器已提示错误；讨论区是附加内容，失败不影响会议详情本身。
+    // 但要如实告诉用户「加载失败」，而不是显示成「还没有人发言」（评审意见）。
+    if (request === discussionRequest) {
+      discussionLoadFailed.value = true
+    }
+  } finally {
+    if (request === discussionRequest) {
+      discussionLoading.value = false
+    }
+  }
+}
+
+/**
+ * 轮询拉取讨论区新消息。
+ *
+ * 只在「会议未结束且未删除」时轮询——已结束的讨论区是只读存档，
+ * 不会再有新消息，没必要空转。
+ */
+async function pollDiscussion(): Promise<void> {
+  if (!detailVisible.value || discussionReadOnly.value) return
+  const convId = discussionConversationId.value
+  if (!convId) return
+
+  const request = discussionRequest
+  const list = await conversationsApi.fetchMessages(convId, 200).catch(() => null)
+  // 序号对不上说明用户已经切到别的会议了，丢弃
+  if (request !== discussionRequest || !list) return
+  if (list.length === discussionMessages.value.length) return
+
+  discussionMessages.value = list
+  // 消息在**弹窗里已经看到了**，所以同样要标记已读——
+  // 否则轮询把新消息拉进来，未读数却还挂着（消息页角标不消）。
+  await conversationsApi.markRead(convId).catch(() => {
+    // 已读失败不阻断；下次轮询还会再试
+  })
+  if (request !== discussionRequest) return
+  // 用户没往上翻才滚到底部
+  if (discussionPinnedToBottom.value) {
+    await scrollDiscussionToBottom()
+  }
+}
+
+/** 启动讨论区轮询定时器 */
+function startDiscussionPolling(): void {
+  stopDiscussionPolling()
+  discussionTimer = setInterval(() => {
+    void pollDiscussion()
+  }, DISCUSSION_POLL_INTERVAL_MS)
+}
+
+/** 停掉讨论区轮询定时器（弹窗关闭、组件卸载、切换会议时都要停） */
+function stopDiscussionPolling(): void {
+  if (discussionTimer) {
+    clearInterval(discussionTimer)
+    discussionTimer = null
+  }
+}
+
+async function scrollDiscussionToBottom(): Promise<void> {
+  await nextTick()
+  const el = discussionScrollRef.value
+  if (el) el.scrollTop = el.scrollHeight
+  discussionPinnedToBottom.value = true
+}
+
+/**
+ * 待发送的附件（讨论区）。
+ *
+ * 只在内存里暂存，**不上传即选中**——避免用户选了个文件又取消，
+ * 服务器上却留下一条没人引用的 file 记录（孤儿文件）。
+ */
+const discussionPendingFile = ref<File | undefined>()
+const discussionUploadRef = ref<{ clearFiles: () => void } | undefined>()
+
+function handleDiscussionFileChange(uploadFile: { raw?: File }): void {
+  discussionPendingFile.value = uploadFile.raw
+  // 清空内部列表：否则第二次选同一文件会被 limit 拦下
+  discussionUploadRef.value?.clearFiles()
+}
+
+function handleDiscussionFileRemove(): void {
+  discussionPendingFile.value = undefined
+}
+
+async function sendDiscussionMessage(): Promise<void> {
+  const content = discussionDraft.value.trim()
+  if (!content || !discussionConversationId.value || discussionSending.value) return
+  if (discussionReadOnly.value) return
+  discussionSending.value = true
+  try {
+    // 有附件时先传文件拿到 fileId，再带 fileId 发消息（两段式）
+    let fileId: string | undefined
+    if (discussionPendingFile.value) {
+      const uploaded = await fileApi.uploadFile(discussionPendingFile.value)
+      fileId = uploaded.id
+    }
+    const message = await conversationsApi.sendMessage(
+      discussionConversationId.value,
+      content,
+      fileId
+    )
+    discussionMessages.value.push(message)
+    discussionDraft.value = ''
+    discussionPendingFile.value = undefined
+    await scrollDiscussionToBottom()
+  } catch {
+    // 提示由拦截器统一处理。
+    // 注意：附件已上传但发消息失败时**保留** discussionPendingFile 供重试，
+    // 否则再点一次发送会重新上传一份，file 表里堆孤儿行。
+  } finally {
+    discussionSending.value = false
+  }
+}
 
 function dayKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
@@ -308,10 +509,14 @@ async function openDetail(row: Pick<MeetingItem, 'id'>): Promise<void> {
   detail.value = null
   detailVisible.value = true
   detailLoading.value = true
+  // 切换会议时先停掉上一场的轮询，避免旧会议的定时器继续拉数据
+  stopDiscussionPolling()
 
   try {
     const result = await meetingsApi.fetchMeeting(row.id)
     if (request === detailRequest) detail.value = result
+    // 讨论区与详情并行加载；失败不阻断详情展示
+    void loadDiscussion(row.id)
   } catch {
     // 请求拦截器已提示 403/404 等错误；不要留下空详情或上一次会议的内容。
     if (request === detailRequest) detailVisible.value = false
@@ -330,6 +535,12 @@ async function openMeetingFromQuery(): Promise<void> {
 }
 
 function handleDetailClosed(): void {
+  // 弹窗关闭：停掉轮询定时器，并让在途的讨论区请求作废
+  // （否则关闭后 A 的响应回来会把已清空的讨论区重新填上）
+  stopDiscussionPolling()
+  discussionRequest += 1
+  discussionLoading.value = false
+
   // Element Plus 的 closed 先于 update:modelValue=false，不能依赖旧的可见值。
   if (route.query.meetingId === undefined) return
   // 消费完深链接后清理参数，同一条提醒再次点击也能触发路由变化。
@@ -348,6 +559,11 @@ watch(
 onMounted(async () => {
   await loadProjects()
   await openMeetingFromQuery()
+})
+
+onBeforeUnmount(() => {
+  // 组件卸载必须停掉定时器，否则路由切走后定时器还在拉数据
+  stopDiscussionPolling()
 })
 </script>
 
@@ -603,6 +819,103 @@ onMounted(async () => {
               <el-table-column prop="email" label="邮箱" min-width="200" />
             </el-table>
           </template>
+
+          <!-- 讨论区（线③ 卡 F-1） -->
+          <div class="discussion">
+            <p class="members-title">
+              讨论区
+              <el-tag v-if="discussionReadOnly" size="small" type="info" effect="plain">
+                {{ discussionReadOnlyReason || '会议已结束，只读' }}
+              </el-tag>
+            </p>
+
+            <div
+              ref="discussionScrollRef"
+              v-loading="discussionLoading"
+              class="discussion-scroll"
+              @scroll="handleDiscussionScroll"
+            >
+              <!-- 加载失败与「没有人发言」要区分开：
+                   失败时显示「加载失败」，否则用户会以为是空会话（评审意见） -->
+              <el-empty
+                v-if="discussionLoadFailed"
+                description="讨论区加载失败，请关闭后重试"
+                :image-size="50"
+              />
+              <el-empty
+                v-else-if="discussionMessages.length === 0 && !discussionLoading"
+                description="还没有人发言"
+                :image-size="50"
+              />
+              <div
+                v-for="msg in discussionMessages"
+                :key="msg.id"
+                class="discussion-msg"
+              >
+                <span class="discussion-sender">{{ msg.senderName }}</span>
+                <span class="discussion-text">{{ msg.content }}</span>
+                <!-- 文件消息（线③ 收尾）：附件卡片；附件被删除时后端不下发 file，降级为纯文本 -->
+                <a
+                  v-if="msg.msgType === 'file' && msg.file"
+                  class="discussion-file"
+                  :href="msg.file.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  :download="msg.file.originalName"
+                >
+                  <span class="discussion-file-icon" aria-hidden="true">📎</span>
+                  <span class="discussion-file-name">{{ msg.file.originalName }}</span>
+                  <span class="discussion-file-size">{{ formatFileSize(msg.file.size) }}</span>
+                </a>
+                <span class="discussion-time">{{ msg.createdAt }}</span>
+              </div>
+            </div>
+
+            <div class="discussion-input">
+              <!-- 待发送的附件：显示在输入框上方，点发送才真正上传 -->
+              <div v-if="discussionPendingFile" class="discussion-pending-file">
+                <span class="discussion-file-icon" aria-hidden="true">📎</span>
+                <span class="discussion-file-name">{{ discussionPendingFile.name }}</span>
+                <span class="discussion-file-size">
+                  {{ formatFileSize(discussionPendingFile.size) }}
+                </span>
+                <el-button link type="danger" @click="handleDiscussionFileRemove">移除</el-button>
+              </div>
+              <el-input
+                v-model="discussionDraft"
+                type="textarea"
+                :rows="2"
+                maxlength="2000"
+                :disabled="discussionReadOnly"
+                :placeholder="
+                  discussionReadOnly
+                    ? discussionReadOnlyReason || '讨论区只读'
+                    : '在讨论区发言，Enter 发送，Shift+Enter 换行'
+                "
+                @keydown.enter.exact.prevent="sendDiscussionMessage"
+              />
+              <el-upload
+                ref="discussionUploadRef"
+                class="discussion-upload"
+                :auto-upload="false"
+                :show-file-list="false"
+                :on-change="handleDiscussionFileChange"
+              >
+                <el-button :disabled="discussionReadOnly || !discussionConversationId">
+                  <span aria-hidden="true">📎</span>
+                  <span class="discussion-upload-text">附件</span>
+                </el-button>
+              </el-upload>
+              <el-button
+                type="primary"
+                :loading="discussionSending"
+                :disabled="!discussionDraft.trim() || discussionReadOnly || !discussionConversationId"
+                @click="sendDiscussionMessage"
+              >
+                发送
+              </el-button>
+            </div>
+          </div>
         </template>
       </div>
     </el-dialog>
@@ -721,6 +1034,111 @@ onMounted(async () => {
   margin: 0 0 8px;
   color: #606266;
   font-size: 13px;
+}
+
+/* 讨论区（线③ 卡 F-1） */
+.discussion {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.discussion-scroll {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 8px;
+  background: #fafafa;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+}
+
+.discussion-msg {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.discussion-sender {
+  color: #409eff;
+  flex-shrink: 0;
+}
+
+.discussion-text {
+  flex: 1;
+  color: #303133;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.discussion-time {
+  color: #c0c4cc;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.discussion-input {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+/* 讨论区里的附件卡片（线③ 收尾） */
+.discussion-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: #ffffff;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  color: #409eff;
+  text-decoration: none;
+  font-size: 12px;
+  max-width: 100%;
+}
+
+.discussion-file:hover {
+  border-color: #409eff;
+}
+
+.discussion-file-icon {
+  font-size: 13px;
+}
+
+.discussion-file-name {
+  color: #303133;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+.discussion-file-size {
+  color: #909399;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.discussion-pending-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.discussion-pending-file .discussion-file-name {
+  color: #303133;
+}
+
+.discussion-upload-text {
+  margin-left: 4px;
 }
 
 .content-text {

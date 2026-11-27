@@ -85,6 +85,18 @@ function mount(query = {}, rows = [meeting('m1')], fetchDetail, options = {}) {
           ElMessageBox: { confirm: async () => 'confirm' }
         }
       if (name === '@/api') return api
+      // 讨论区的附件卡片要格式化文件大小（线③ 收尾）
+      if (name === '@/utils/display') {
+        return {
+          formatFileSize: (size) => {
+            const bytes = typeof size === 'string' ? Number(size) : size
+            if (!Number.isFinite(bytes) || bytes < 0) return '0 B'
+            if (bytes < 1024) return `${Math.floor(bytes)} B`
+            if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+            return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+          }
+        }
+      }
       throw new Error(`未声明的测试依赖：${name}`)
     }
   })

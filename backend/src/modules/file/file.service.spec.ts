@@ -1,6 +1,6 @@
 import { resolve as pathResolve } from 'node:path';
 import { ConfigService } from '@nestjs/config';
-import { FileService } from './file.service';
+import { FileService, decodeOriginalName } from './file.service';
 import { PrismaService } from '../../prisma/prisma.service';
 
 /** 合法的 UUID 字符串，用于 mock 返回值，保证能通过 URL 正则 */
@@ -96,6 +96,108 @@ describe('FileService.save', () => {
       /^\d{4}\/\d{2}\/\d{2}\/[a-f0-9-]+\.pdf$/,
     );
     expect(createCalls[0][0].data.originalName).toBe('论文.pdf');
+  });
+});
+
+describe('decodeOriginalName', () => {
+  it('纯 ASCII 名原样返回', () => {
+    expect(decodeOriginalName('report.pdf')).toBe('report.pdf');
+  });
+
+  it('已是正常 UTF-8 的中文名原样返回', () => {
+    expect(decodeOriginalName('纪要.txt')).toBe('纪要.txt');
+  });
+
+  it('被 latin1 误读的 UTF-8 名字被还原', () => {
+    // 浏览器发 UTF-8，multer 按 latin1 解 → 「纪要」变成「çºªè¦」
+    const mangled = Buffer.from('纪要.txt', 'utf8').toString('latin1');
+    expect(mangled).not.toBe('纪要.txt');
+    expect(decodeOriginalName(mangled)).toBe('纪要.txt');
+  });
+
+  it('还原失败时保持原样（不制造替换字符）', () => {
+    // 单个 0xE9 不是合法 UTF-8 序列 → 应原样返回，而不是塞一堆 U+FFFD
+    const broken = 'café.txt';
+    const result = decodeOriginalName(broken);
+    expect(result).toBe(broken);
+    expect(result).not.toContain('\ufffd');
+  });
+
+  it('空字符串安全', () => {
+    expect(decodeOriginalName('')).toBe('');
+  });
+});
+
+describe('FileService.save（中文文件名）', () => {
+  it('乱码文件名被纠正后仍能通过扩展名白名单校验', async () => {
+    const { service, prisma } = createService();
+    prisma.file.create.mockResolvedValue({
+      id: 10n,
+      originalName: '纪要.txt',
+      url: `/api/v1/files/2026/11/27/${MOCK_UUID}.txt`,
+      size: 1024n,
+      mimeType: 'text/plain',
+      createdAt: new Date('2026-11-27T14:00:00Z'),
+    });
+
+    // ⚠️ 纠正前的说法有误：乱码**不影响扩展名**——扩展名是 ASCII（.exe），
+    // latin1 解码不变，所以白名单一直按真实后缀判定。这里把真实行为钉住。
+    const mangled = Buffer.from('报告.exe', 'utf8').toString('latin1');
+    await expect(
+      service.save(
+        buildMulterFile({ originalname: mangled, mimetype: 'text/plain' }),
+        '1',
+      ),
+    ).rejects.toMatchObject({ code: 400 });
+
+    // 纠正编码后仍是 .exe → 依然被拒（白名单按真实扩展名判）
+    const correct = Buffer.from('报告.exe', 'utf8').toString('latin1');
+    expect(decodeOriginalName(correct)).toBe('报告.exe');
+  });
+
+  it('乱码不影响扩展名判定（.txt 仍是 .txt，白名单照常放行）', async () => {
+    const { service, prisma } = createService();
+    prisma.file.create.mockResolvedValue({
+      id: 10n,
+      originalName: '纪要.txt',
+      url: `/api/v1/files/2026/11/27/${MOCK_UUID}.txt`,
+      size: 1024n,
+      mimeType: 'text/plain',
+      createdAt: new Date('2026-11-27T14:00:00Z'),
+    });
+
+    // 中文名乱码成什么样，扩展名都是 .txt → 白名单放行
+    const mangled = Buffer.from('纪要.txt', 'utf8').toString('latin1');
+    const result = await service.save(
+      buildMulterFile({ originalname: mangled, mimetype: 'text/plain' }),
+      '1',
+    );
+    expect(result.originalName).toBe('纪要.txt');
+  });
+
+  it('中文名（已乱码）落库时存的是纠正后的名字', async () => {
+    const { service, prisma } = createService();
+    prisma.file.create.mockResolvedValue({
+      id: 11n,
+      originalName: '会议纪要.txt',
+      url: `/api/v1/files/2026/11/27/${MOCK_UUID}.txt`,
+      size: 1024n,
+      mimeType: 'text/plain',
+      createdAt: new Date('2026-11-27T14:00:00Z'),
+    });
+
+    const mangled = Buffer.from('会议纪要.txt', 'utf8').toString('latin1');
+    await service.save(
+      buildMulterFile({ originalname: mangled, mimetype: 'text/plain' }),
+      '1',
+    );
+
+    const createCalls = prisma.file.create.mock.calls as unknown as Array<
+      [{ data: { originalName: string; storedPath: string } }]
+    >;
+    expect(createCalls[0][0].data.originalName).toBe('会议纪要.txt');
+    // 落盘路径用 UUID + 真实扩展名，不受中文名影响
+    expect(createCalls[0][0].data.storedPath).toMatch(/\.txt$/);
   });
 });
 
