@@ -65,9 +65,15 @@ export function ensureMeetingConversation(meetingId: string) {
   return http.post<ConversationItem>('/api/v1/conversations/meeting', { meetingId })
 }
 
-/** 会议讨论区是否只读（会议已结束 → true，前端据此禁用输入框） */
+/**
+ * 会议讨论区是否只读（会议已结束或已删除 → true，前端据此禁用输入框）
+ *
+ * reason 用于给用户不同的说明文案（已结束 / 已删除），空串表示可发言。
+ */
 export function fetchMeetingDiscussionReadOnly(conversationId: string) {
-  return http.get<{ readOnly: boolean }>(`/api/v1/conversations/meeting/${conversationId}/readonly`)
+  return http.get<{ readOnly: boolean; reason: string }>(
+    `/api/v1/conversations/meeting/${conversationId}/readonly`
+  )
 }
 
 /** 创建/获取私信会话（线③ 卡 E-3：不再要求同组；非好友每方向限发 1 条） */
