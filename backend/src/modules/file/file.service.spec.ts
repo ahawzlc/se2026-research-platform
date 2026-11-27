@@ -140,7 +140,8 @@ describe('FileService.save（中文文件名）', () => {
       createdAt: new Date('2026-11-27T14:00:00Z'),
     });
 
-    // 「报告.exe」被误读成乱码后，扩展名会跟着乱 → 白名单会拒
+    // ⚠️ 纠正前的说法有误：乱码**不影响扩展名**——扩展名是 ASCII（.exe），
+    // latin1 解码不变，所以白名单一直按真实后缀判定。这里把真实行为钉住。
     const mangled = Buffer.from('报告.exe', 'utf8').toString('latin1');
     await expect(
       service.save(
@@ -152,6 +153,26 @@ describe('FileService.save（中文文件名）', () => {
     // 纠正编码后仍是 .exe → 依然被拒（白名单按真实扩展名判）
     const correct = Buffer.from('报告.exe', 'utf8').toString('latin1');
     expect(decodeOriginalName(correct)).toBe('报告.exe');
+  });
+
+  it('乱码不影响扩展名判定（.txt 仍是 .txt，白名单照常放行）', async () => {
+    const { service, prisma } = createService();
+    prisma.file.create.mockResolvedValue({
+      id: 10n,
+      originalName: '纪要.txt',
+      url: `/api/v1/files/2026/11/27/${MOCK_UUID}.txt`,
+      size: 1024n,
+      mimeType: 'text/plain',
+      createdAt: new Date('2026-11-27T14:00:00Z'),
+    });
+
+    // 中文名乱码成什么样，扩展名都是 .txt → 白名单放行
+    const mangled = Buffer.from('纪要.txt', 'utf8').toString('latin1');
+    const result = await service.save(
+      buildMulterFile({ originalname: mangled, mimetype: 'text/plain' }),
+      '1',
+    );
+    expect(result.originalName).toBe('纪要.txt');
   });
 
   it('中文名（已乱码）落库时存的是纠正后的名字', async () => {

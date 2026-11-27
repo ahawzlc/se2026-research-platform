@@ -491,6 +491,108 @@ describe('ConversationsService.assertMessageAllowed（会议讨论区只读）',
     expect(result.id).toBe('102');
     expect(prisma.meeting.findFirst).not.toHaveBeenCalled();
   });
+
+  it('会议已被删除 → 403（讨论区只读，评审意见）', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    // 已删除但**未结束**（开始时间就在刚才）——最能说明问题的一组：
+    // 只看「是否结束」的话，这里会被放行。
+    prisma.meeting.findFirst.mockResolvedValue({
+      heldAt: new Date(),
+      deleted: 1,
+    });
+
+    await expect(
+      service.sendConversationMessage('1', '5', '会议没了还能说吗'),
+    ).rejects.toMatchObject({
+      code: 403,
+      message: '会议已删除，讨论区只读，不能再发言',
+    });
+  });
+
+  it('会议行已不存在 → 403（不放行）', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    prisma.meeting.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.sendConversationMessage('1', '5', '幽灵会议'),
+    ).rejects.toMatchObject({ code: 403 });
+  });
+});
+
+describe('ConversationsService.isMeetingDiscussionReadOnly', () => {
+  it('会议已结束 → 只读，并给出原因', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    prisma.meeting.findFirst.mockResolvedValue({
+      heldAt: new Date(Date.now() - 3 * 60 * 60 * 1000),
+      deleted: 0,
+    });
+
+    const result = await service.isMeetingDiscussionReadOnly('1', '5');
+    expect(result.readOnly).toBe(true);
+    expect(result.reason).toBe('会议已结束，讨论区只读');
+  });
+
+  it('会议已删除 → 只读，原因与「已结束」不同', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    prisma.meeting.findFirst.mockResolvedValue({
+      heldAt: new Date(),
+      deleted: 1,
+    });
+
+    const result = await service.isMeetingDiscussionReadOnly('1', '5');
+    expect(result.readOnly).toBe(true);
+    expect(result.reason).toBe('会议已删除，讨论区只读');
+  });
+
+  it('会议未结束 → 可发言（readOnly=false，reason 为空）', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    prisma.meeting.findFirst.mockResolvedValue({
+      heldAt: new Date(),
+      deleted: 0,
+    });
+
+    const result = await service.isMeetingDiscussionReadOnly('1', '5');
+    expect(result.readOnly).toBe(false);
+    expect(result.reason).toBe('');
+  });
+
+  it('会议未排期 → 可发言', async () => {
+    const { service, prisma } = createService();
+    prisma.conversationMember.findFirst.mockResolvedValue({ id: 1n });
+    prisma.conversation.findFirst.mockResolvedValue({
+      type: 'meeting',
+      refId: 3n,
+    });
+    prisma.meeting.findFirst.mockResolvedValue({ heldAt: null, deleted: 0 });
+
+    const result = await service.isMeetingDiscussionReadOnly('1', '5');
+    expect(result.readOnly).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
