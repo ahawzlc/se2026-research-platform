@@ -7,7 +7,7 @@
 export const EMPTY_NICKNAME = '未设置昵称'
 
 export function displayNickname(nickname: string): string {
-    return nickname.trim() || EMPTY_NICKNAME
+  return nickname.trim() || EMPTY_NICKNAME
 }
 
 /**
@@ -20,20 +20,20 @@ export function displayNickname(nickname: string): string {
  * 恰好 1024 的进位边界：1023 B → '1023 B'，1024 B → '1.0 KB'。
  */
 export function formatFileSize(size: string | number | undefined | null): string {
-    const bytes = typeof size === 'string' ? Number(size) : (size ?? Number.NaN)
-    if (!Number.isFinite(bytes) || bytes < 0) {
-        return '0 B'
-    }
-    if (bytes < 1024) {
-        return `${Math.floor(bytes)} B`
-    }
-    const kb = bytes / 1024
-    if (kb < 1024) {
-        return `${kb.toFixed(1)} KB`
-    }
-    const mb = kb / 1024
-    if (mb < 1024) {
-        return `${mb.toFixed(1)} MB`
-    }
-    return `${(mb / 1024).toFixed(1)} GB`
+  const bytes = typeof size === 'string' ? Number(size) : (size ?? Number.NaN)
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '0 B'
+  }
+  if (bytes < 1024) {
+    return `${Math.floor(bytes)} B`
+  }
+  const kb = bytes / 1024
+  if (kb < 1024) {
+    return `${kb.toFixed(1)} KB`
+  }
+  const mb = kb / 1024
+  if (mb < 1024) {
+    return `${mb.toFixed(1)} MB`
+  }
+  return `${(mb / 1024).toFixed(1)} GB`
 }
