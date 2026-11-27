@@ -188,3 +188,101 @@ describe('文件消息渲染（T-2 / A-3）', () => {
     expect(wrapper.text()).toContain('附件没了')
   })
 })
+
+// ---------------------------------------------------------------- 只读会话
+
+describe('会议讨论区在消息页的只读处理（PR #51 评审）', () => {
+  const meetingConv = conversation({
+    id: '20',
+    type: 'meeting',
+    title: '会议「第三次讨论会」讨论区'
+  })
+
+  it('只读会议讨论区：输入框禁用 + 给出说明 + 不发消息请求', async () => {
+    conversationsApi.fetchConversations.mockResolvedValue({
+      list: [meetingConv],
+      total: 1
+    })
+    conversationsApi.fetchMeetingDiscussionReadOnly.mockResolvedValue({
+      readOnly: true,
+      reason: '会议已结束，讨论区只读'
+    })
+
+    const wrapper = await mountView()
+    await openFirstConversation(wrapper)
+
+    expect(wrapper.text()).toContain('会议已结束，讨论区只读')
+    const textarea = wrapper.find('.msg-input textarea')
+    expect(textarea.attributes('disabled')).toBeDefined()
+
+    // 强行触发也不该发请求
+    await textarea.setValue('想说点什么')
+    const sendBtn = wrapper.findAll('.msg-input button').find((b) => b.text().includes('发送'))
+    await sendBtn?.trigger('click')
+    await flushPromises()
+    expect(conversationsApi.sendMessage).not.toHaveBeenCalled()
+    // 附件按钮也禁用：不然用户还能选文件
+    const uploadBtn = wrapper.findAll('.msg-upload button')[0]
+    expect(uploadBtn.attributes('disabled')).toBeDefined()
+  })
+
+  it('非会议会话不查只读接口，也不锁输入框', async () => {
+    const wrapper = await mountView()
+    await openFirstConversation(wrapper)
+
+    expect(conversationsApi.fetchMeetingDiscussionReadOnly).not.toHaveBeenCalled()
+    expect(wrapper.find('.msg-input textarea').attributes('disabled')).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------- 孤儿文件
+
+describe('发消息失败不产生孤儿文件（PR #51 评审）', () => {
+  it('上传成功但发消息失败：重试时复用已上传的 fileId，不重复上传', async () => {
+    conversationsApi.fetchConversations.mockResolvedValue({
+      list: [conversation()],
+      total: 1
+    })
+    conversationsApi.sendMessage
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce(message({ id: '999' }))
+
+    const wrapper = await mountView()
+    await openFirstConversation(wrapper)
+
+    // 选一个附件。el-upload 的 on-change 是 **prop**（不是 emit），
+    // 所以直接调 prop，而不是 vm.$emit('change')。
+    const upload = wrapper.findComponent({ name: 'ElUpload' })
+    const onChange = (upload.props() as Record<string, unknown>)['onChange'] as
+      | ((f: unknown) => void)
+      | undefined
+    expect(typeof onChange).toBe('function')
+    onChange?.({ raw: new File(['x'], 'a.txt') })
+    await flushPromises()
+
+    // 第一次发送：上传 + 发消息失败
+    const textarea = wrapper.find('.msg-input textarea')
+    await textarea.setValue('带附件的消息')
+    const sendBtn = wrapper.findAll('.msg-input button').find((b) => b.text().includes('发送'))
+    await sendBtn?.trigger('click')
+    await flushPromises()
+
+    expect(fileApi.uploadFile).toHaveBeenCalledTimes(1)
+    expect(conversationsApi.sendMessage).toHaveBeenCalledTimes(1)
+    // 失败后草稿还在，用户可以直接重试
+    expect((textarea.element as HTMLTextAreaElement).value).toBe('带附件的消息')
+
+    // 第二次发送（重试）：**不再上传**
+    await sendBtn?.trigger('click')
+    await flushPromises()
+
+    expect(fileApi.uploadFile).toHaveBeenCalledTimes(1)
+    expect(conversationsApi.sendMessage).toHaveBeenCalledTimes(2)
+    // 重试时用的是第一次上传出来的 fileId
+    expect(conversationsApi.sendMessage).toHaveBeenLastCalledWith(
+      '10',
+      '带附件的消息',
+      '500'
+    )
+  })
+})

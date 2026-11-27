@@ -721,6 +721,53 @@ maybe('沟通链真库集成（线③ 卡 T-1c）', () => {
       .expect(201);
   });
 
+  it('卡面3：会议被删除后讨论区只读（403），只读接口给出「已删除」原因', async () => {
+    const teamId = await createTeam(`T-1c组_${RUN}`, [bob.userId]);
+    const projectId = await createProject(`T-1c项目_${RUN}`, teamId);
+
+    const created = await request(app.getHttpServer())
+      .post('/api/v1/meetings')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({
+        projectId,
+        title: `T-1c会议_${RUN}`,
+        // 会议**未结束**（排在未来）：只按「是否结束」判定的话这里会被放行，
+        // 所以这组最能说明「已删除也要只读」这条规则不是多余的。
+        heldAt: '2099-01-01 10:00:00',
+      })
+      .expect(201);
+    const meetingId = envelope<{ id: string }>(created).data?.id ?? '';
+
+    const mt = await request(app.getHttpServer())
+      .post('/api/v1/conversations/meeting')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ meetingId })
+      .expect(201);
+    const mtId = envelope<ConversationBody>(mt).data?.id ?? '';
+
+    // 删除会议
+    await request(app.getHttpServer())
+      .delete(`/api/v1/meetings/${meetingId}`)
+      .set('Authorization', `Bearer ${alice.token}`)
+      .expect(200);
+
+    // 只读接口：readOnly=true，原因与「已结束」不同
+    const ro = await request(app.getHttpServer())
+      .get(`/api/v1/conversations/meeting/${mtId}/readonly`)
+      .set('Authorization', `Bearer ${alice.token}`)
+      .expect(200);
+    const roBody = envelope<{ readOnly: boolean; reason: string }>(ro).data;
+    expect(roBody?.readOnly).toBe(true);
+    expect(roBody?.reason).toBe('会议已删除，讨论区只读');
+
+    // 不能发（会议都没了，讨论区不该还能发言）
+    await request(app.getHttpServer())
+      .post(`/api/v1/conversations/${mtId}/messages`)
+      .set('Authorization', `Bearer ${alice.token}`)
+      .send({ content: '会议都删了还能说' })
+      .expect(403);
+  });
+
   // ================================================================
   // 卡面第 4 条：文件消息与文本消息混合列表的分页顺序
   // ================================================================
@@ -809,6 +856,30 @@ maybe('沟通链真库集成（线③ 卡 T-1c）', () => {
     // 取的是**最新**的 2 条（实现是倒序取 limit 再正序）
     const lastTwo = mine.slice(-2).map((m) => m.content);
     expect(limitedList.map((m) => m.content)).toEqual(lastTwo);
+  });
+
+  it('卡面4：中文文件名落库不乱码（defParamCharset: utf8）', async () => {
+    const upload = await request(app.getHttpServer())
+      .post('/api/v1/files/upload')
+      .set('Authorization', `Bearer ${alice.token}`)
+      .attach('file', Buffer.from('中文名内容'), '会议纪要.txt')
+      .expect(201);
+    const fileId =
+      envelope<{ id: string; originalName: string }>(upload).data?.id ?? '';
+
+    // 接口返回的原始文件名就是正常中文，不是乱码
+    expect(envelope<{ originalName: string }>(upload).data?.originalName).toBe(
+      '会议纪要.txt',
+    );
+
+    // 真库里存的也是正常中文
+    const row = await prisma.file.findFirst({
+      where: { id: BigInt(fileId) },
+      select: { originalName: true, storedPath: true },
+    });
+    expect(row?.originalName).toBe('会议纪要.txt');
+    // 落盘路径用 UUID + 真实扩展名，不受中文名影响
+    expect(row?.storedPath).toMatch(/\.txt$/);
   });
 
   it('卡面4：文件消息的真库落库形态（msg_type + file_id 外键）', async () => {
