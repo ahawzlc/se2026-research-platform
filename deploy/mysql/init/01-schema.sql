@@ -319,9 +319,8 @@ CREATE TABLE `message` (
   `deleted`         TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '逻辑删除：0 正常，1 已删除',
   PRIMARY KEY (`id`),
   KEY `idx_message_conversation` (`conversation_id`, `id`),
-  KEY `idx_message_file` (`file_id`),
   KEY `message_sender_id_fkey` (`sender_id`),
-  KEY `message_file_id_fkey` (`file_id`),
+  KEY `idx_message_file` (`file_id`),
   CONSTRAINT `message_conversation_id_fkey` FOREIGN KEY (`conversation_id`) REFERENCES `conversation` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT `message_sender_id_fkey` FOREIGN KEY (`sender_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT `message_file_id_fkey` FOREIGN KEY (`file_id`) REFERENCES `file` (`id`) ON DELETE SET NULL ON UPDATE CASCADE

@@ -64,6 +64,10 @@ jobs:
           check 1  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='message' AND column_name='file_id'")" "message.file_id 列存在"
           check 1  "$(q "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics WHERE table_schema='se2026' AND table_name='message' AND index_name='idx_message_file'")" "idx_message_file 索引存在"
           check 1  "$(q "SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='se2026' AND constraint_name='message_file_id_fkey'")" "message_file_id_fkey 外键存在"
+          # 升级终态与全新安装同构：file_id 上只留 idx_message_file 一个索引（外键直接复用它）；
+          # content 的注释由迁移脚本的 MODIFY COLUMN 同步。只数「存在」拦不住多建或漏建，这里数总数
+          check 4  "$(q "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics WHERE table_schema='se2026' AND table_name='message'")" "message 表索引个数"
+          check 1  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='message' AND column_name='content' AND column_comment LIKE '%file%'")" "message.content 列注释"
           # 线③ 卡 E-3：user 表新增 3 列（public_uid/bio/profile_visibility）
           check 3  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user' AND column_name IN ('public_uid','bio','profile_visibility')")" "user 表线③新增列数"
           check 12 "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user'")" "user 表总列数"
@@ -102,6 +106,9 @@ jobs:
           check 1  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='message' AND column_name='file_id'")" "message.file_id 列存在"
           check 1  "$(q "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics WHERE table_schema='se2026' AND table_name='message' AND index_name='idx_message_file'")" "idx_message_file 索引存在"
           check 1  "$(q "SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='se2026' AND constraint_name='message_file_id_fkey'")" "message_file_id_fkey 外键存在"
+          # 同上：升级路径也断言索引总数与 content 注释，两条路径终态一致
+          check 4  "$(q "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics WHERE table_schema='se2026' AND table_name='message'")" "message 表索引个数"
+          check 1  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='message' AND column_name='content' AND column_comment LIKE '%file%'")" "message.content 列注释"
           # 线③ 卡 E-3：迁移后 user 表必须与全新安装同构
           check 3  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user' AND column_name IN ('public_uid','bio','profile_visibility')")" "user 表线③新增列数"
           check 12 "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user'")" "user 表总列数"
