@@ -57,13 +57,21 @@ jobs:
             [ "$2" = "$1" ] || { echo "::error::$3 期望 $1 实际 $2"; exit 1; }
           }
           check 24 "$(q "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='se2026'")" "全库表数"
-          check 38 "$(q "SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='se2026'")" "外键总数"
+          check 39 "$(q "SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='se2026'")" "外键总数"
           check 8  "$(q "SELECT COUNT(*) FROM se2026.community_tag WHERE deleted=0")" "标签字典种子"
           check 1  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='conversation' AND column_name='type' AND column_comment LIKE '%meeting%'")" "conversation.type 含 meeting"
+          # 线③ 收尾：message 表新增 file_id（文件消息附件落点）
+          check 1  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='message' AND column_name='file_id'")" "message.file_id 列存在"
+          check 1  "$(q "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics WHERE table_schema='se2026' AND table_name='message' AND index_name='idx_message_file'")" "idx_message_file 索引存在"
+          check 1  "$(q "SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='se2026' AND constraint_name='message_file_id_fkey'")" "message_file_id_fkey 外键存在"
           # 线③ 卡 E-3：user 表新增 3 列（public_uid/bio/profile_visibility）
           check 3  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user' AND column_name IN ('public_uid','bio','profile_visibility')")" "user 表线③新增列数"
           check 12 "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user'")" "user 表总列数"
           check 1  "$(q "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics WHERE table_schema='se2026' AND table_name='user' AND index_name='uk_user_public_uid'")" "uk_user_public_uid 唯一索引存在"
+          # 列顺序（迁移脚本用 AFTER msg_type 保证与全新安装同构）
+          check "content msg_type file_id ref_type" \
+            "$(q "SELECT GROUP_CONCAT(column_name ORDER BY ordinal_position SEPARATOR ' ') FROM information_schema.columns WHERE table_schema='se2026' AND table_name='message' AND column_name IN ('content','msg_type','file_id','ref_type')")" \
+            "message 表列顺序"
           # 列顺序（迁移脚本用 AFTER 保证与全新安装同构，见评审意见 B2②）
           check "email public_uid bio profile_visibility created_at" \
             "$(q "SELECT GROUP_CONCAT(column_name ORDER BY ordinal_position SEPARATOR ' ') FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user' AND column_name IN ('email','public_uid','bio','profile_visibility','created_at')")" \
@@ -87,13 +95,21 @@ jobs:
           q() { mysql -h127.0.0.1 -uroot -N -e "$1"; }
           check() { [ "$2" = "$1" ] || { echo "::error::$3 期望 $1 实际 $2"; exit 1; }; }
           check 24 "$(q "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='se2026'")" "全库表数"
-          check 38 "$(q "SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='se2026'")" "外键总数"
+          check 39 "$(q "SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='se2026'")" "外键总数"
           check 8  "$(q "SELECT COUNT(*) FROM se2026.community_tag WHERE deleted=0")" "标签字典种子"
           check 1  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='conversation' AND column_name='type' AND column_comment LIKE '%meeting%'")" "conversation.type 含 meeting"
+          # 线③ 收尾：message 表新增 file_id（文件消息附件落点）
+          check 1  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='message' AND column_name='file_id'")" "message.file_id 列存在"
+          check 1  "$(q "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics WHERE table_schema='se2026' AND table_name='message' AND index_name='idx_message_file'")" "idx_message_file 索引存在"
+          check 1  "$(q "SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema='se2026' AND constraint_name='message_file_id_fkey'")" "message_file_id_fkey 外键存在"
           # 线③ 卡 E-3：迁移后 user 表必须与全新安装同构
           check 3  "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user' AND column_name IN ('public_uid','bio','profile_visibility')")" "user 表线③新增列数"
           check 12 "$(q "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user'")" "user 表总列数"
           check 1  "$(q "SELECT COUNT(DISTINCT index_name) FROM information_schema.statistics WHERE table_schema='se2026' AND table_name='user' AND index_name='uk_user_public_uid'")" "uk_user_public_uid 唯一索引存在"
+          # 列顺序（迁移脚本用 AFTER msg_type 保证与全新安装同构）
+          check "content msg_type file_id ref_type" \
+            "$(q "SELECT GROUP_CONCAT(column_name ORDER BY ordinal_position SEPARATOR ' ') FROM information_schema.columns WHERE table_schema='se2026' AND table_name='message' AND column_name IN ('content','msg_type','file_id','ref_type')")" \
+            "message 表列顺序"
           # 列顺序必须与全新安装一致（迁移脚本用 AFTER email 保证，见评审意见 B2②）
           check "email public_uid bio profile_visibility created_at" \
             "$(q "SELECT GROUP_CONCAT(column_name ORDER BY ordinal_position SEPARATOR ' ') FROM information_schema.columns WHERE table_schema='se2026' AND table_name='user' AND column_name IN ('email','public_uid','bio','profile_visibility','created_at')")" \

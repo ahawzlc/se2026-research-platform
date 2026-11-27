@@ -131,6 +131,7 @@ model File {
   uploader    User          @relation("FileUploader", fields: [uploaderId], references: [id])
   literature  Literature[]
   achievements Achievement[]
+  messages    Message[]
 
   @@index([uploaderId], map: "idx_file_uploader")
   @@map("file")
@@ -378,6 +379,8 @@ model Message {
   senderId       BigInt   @map("sender_id") @db.UnsignedBigInt
   content        String?  @db.Text
   msgType        String   @default("text") @map("msg_type") @db.VarChar(20)
+  /// 附件（msg_type = file 时指向 file.id；文献/成果同款外键，ON DELETE SET NULL）
+  fileId         BigInt?  @map("file_id") @db.UnsignedBigInt
   refType        String?  @map("ref_type") @db.VarChar(30)
   refId          BigInt?  @map("ref_id") @db.UnsignedBigInt
   createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(0)
@@ -385,8 +388,10 @@ model Message {
 
   conversation Conversation @relation(fields: [conversationId], references: [id])
   sender       User         @relation("MessageSender", fields: [senderId], references: [id])
+  file         File?        @relation(fields: [fileId], references: [id])
 
   @@index([conversationId, id], map: "idx_message_conversation")
+  @@index([fileId], map: "idx_message_file")
   @@map("message")
 }
 
