@@ -67,11 +67,25 @@ const CDP_PORT = Number(process.env.CDP_PORT ?? 9222)
 const suffix = randomUUID().slice(0, 8)
 const password = 'Line3Acceptance1234!'
 
-let checks = 0
+/**
+ * 断言计数：**浏览器级**与**接口级**分开记。
+ *
+ * 评审意见：原脚本把接口调用也计入总数，打印出来的「22 项断言」里
+ * 有 13 次是接口调用计数——那些只能证明「后端对」，证明不了「前端做了」。
+ * 现在分成两个计数器，收尾时分别报，**浏览器级的才是本页真正要守的东西**。
+ */
+let browserChecks = 0
+let apiChecks = 0
 
 function ok(message) {
-  checks++
+  browserChecks++
   console.log(`  ✓ ${message}`)
+}
+
+/** 接口级断言（只证明后端对） */
+function okApi(message) {
+  apiChecks++
+  console.log(`  · ${message}（接口级）`)
 }
 
 // ---------------------------------------------------------------- API 辅助
@@ -93,10 +107,9 @@ async function api(path, { method = 'GET', token, body, status } = {}) {
   } else {
     assert(res.ok && result.code === 0, `${method} ${path} · ${res.status} · ${result.message}`)
   }
-  checks++
+  apiChecks++
   return result.data
 }
-
 const post = (path, body, token) => api(path, { method: 'POST', token, body })
 const put = (path, body, token) => api(path, { method: 'PUT', token, body })
 const get = (path, token) => api(path, { token })
@@ -629,7 +642,10 @@ try {
   assert(msgReadOnly === true, '消息页里会议讨论区只读时输入框应禁用')
   ok('F-1 消息页：会议讨论区只读，输入框禁用')
 
-  console.log(`\n线③ 黄金路径验收通过，共 ${checks} 项断言`)
+  console.log(
+    `\n线③ 黄金路径验收通过：浏览器级断言 ${browserChecks} 项` +
+      `（另有接口级 ${apiChecks} 项，只证明后端对，不计入门禁口径）`
+  )
 } finally {
   cdp?.close()
   chrome.kill()
