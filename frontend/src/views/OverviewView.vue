@@ -22,16 +22,15 @@ const focusProjectId = ref((route.query.projectId as string) || '')
 const visibleTasks = computed<TaskItem[]>(() => {
   if (!snapshot.value) return []
   const tasks = snapshot.value.activeTasks
-  return focusProjectId.value
-    ? tasks.filter((t) => t.projectId === focusProjectId.value)
-    : tasks
+  return focusProjectId.value ? tasks.filter((t) => t.projectId === focusProjectId.value) : tasks
 })
 
-const PRIORITY_META: Record<TaskPriority, { label: string; type: 'danger' | 'warning' | 'info' }> = {
-  high: { label: '高', type: 'danger' },
-  medium: { label: '中', type: 'warning' },
-  low: { label: '低', type: 'info' }
-}
+const PRIORITY_META: Record<TaskPriority, { label: string; type: 'danger' | 'warning' | 'info' }> =
+  {
+    high: { label: '高', type: 'danger' },
+    medium: { label: '中', type: 'warning' },
+    low: { label: '低', type: 'info' }
+  }
 
 const STATUS_META: Record<TaskStatus, { label: string; type: 'info' | 'warning' }> = {
   todo: { label: '待办', type: 'info' },
@@ -87,12 +86,14 @@ function projectProgress(project: ProjectItem): number {
 }
 
 /** 项目截止临期/逾期提示（B-补1 对项目本身的截止日也给出提示） */
-function projectEndDateHint(project: ProjectItem): { text: string; type: 'danger' | 'warning' } | null {
+function projectEndDateHint(
+  project: ProjectItem
+): { text: string; type: 'danger' | 'warning' } | null {
   if (!project.endDate) return null
   if (project.endDate < today()) return { text: `已过截止 ${project.endDate}`, type: 'danger' }
   const in7 = new Date()
   in7.setDate(in7.getDate() + 7)
-  if (project.endDate <= in7.toISOString().slice(0, 10)) {
+  if (project.endDate <= today(in7)) {
     return { text: `临近截止 ${project.endDate}`, type: 'warning' }
   }
   return null
@@ -178,7 +179,11 @@ onMounted(() => {
           <div class="project-line">
             <span class="muted">里程碑</span>
             <span>{{ project.milestoneDone }}/{{ project.milestoneTotal }}</span>
-            <span v-if="projectEndDateHint(project)" class="end-hint" :class="projectEndDateHint(project)!.type">
+            <span
+              v-if="projectEndDateHint(project)"
+              class="end-hint"
+              :class="projectEndDateHint(project)!.type"
+            >
               {{ projectEndDateHint(project)!.text }}
             </span>
           </div>
@@ -197,19 +202,35 @@ onMounted(() => {
       </el-button>
     </h2>
     <el-empty v-if="snapshot && visibleTasks.length === 0" description="没有进行中的任务" />
-    <el-card v-for="group in memberGroups" v-else :key="group.name" shadow="never" class="member-card">
+    <el-card
+      v-for="group in memberGroups"
+      v-else
+      :key="group.name"
+      shadow="never"
+      class="member-card"
+    >
       <template #header>
         <span class="member-name">{{ group.name }}</span>
         <span class="muted member-count">{{ group.tasks.length }} 项未完成</span>
       </template>
       <div v-for="task in group.tasks" :key="task.id" class="work-item">
-        <el-tag size="small" :type="STATUS_META[task.status].type">{{ STATUS_META[task.status].label }}</el-tag>
-        <el-tag size="small" :type="PRIORITY_META[task.priority as TaskPriority].type" effect="plain">
+        <el-tag size="small" :type="STATUS_META[task.status].type">
+          {{ STATUS_META[task.status].label }}
+        </el-tag>
+        <el-tag
+          size="small"
+          :type="PRIORITY_META[task.priority as TaskPriority].type"
+          effect="plain"
+        >
           {{ PRIORITY_META[task.priority as TaskPriority].label }}
         </el-tag>
         <span class="work-title">{{ task.title }}</span>
         <span class="muted">{{ task.projectName }}</span>
-        <span v-if="task.dueDate" class="work-due" :class="{ 'is-overdue': task.dueDate < today() }">
+        <span
+          v-if="task.dueDate"
+          class="work-due"
+          :class="{ 'is-overdue': task.dueDate < today() }"
+        >
           截止 {{ task.dueDate }}
         </span>
       </div>

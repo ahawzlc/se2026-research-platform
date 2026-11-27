@@ -18,6 +18,7 @@ import type {
   TitleComponentOption
 } from 'echarts/components'
 import { projectsApi } from '@/api'
+import { isMilestoneOverdue } from '@/utils/overview'
 import type { ProjectItem } from '@/api/projects'
 
 /** 组合后的图表配置类型 */
@@ -57,9 +58,7 @@ const chartRef = ref<HTMLElement | null>(null)
 const loading = ref(false)
 let chart: echarts.ECharts | null = null
 
-const currentProject = computed(() =>
-  projects.value.find((p) => p.id === currentProjectId.value)
-)
+const currentProject = computed(() => projects.value.find((p) => p.id === currentProjectId.value))
 
 /**
  * 甘特图行数据：里程碑按截止日期排布。
@@ -88,7 +87,6 @@ async function loadMilestones(): Promise<void> {
   try {
     const info = await projectsApi.fetchProject(currentProjectId.value)
     const milestones = await projectsApi.fetchMilestones(currentProjectId.value)
-    const today = new Date().toISOString().slice(0, 10)
 
     rows.value = milestones
       .filter((m) => m.dueDate)
@@ -97,7 +95,7 @@ async function loadMilestones(): Promise<void> {
         name: m.name,
         start: info.startDate || m.dueDate,
         end: m.dueDate,
-        overdue: m.status !== 'done' && m.dueDate < today
+        overdue: isMilestoneOverdue(m)
       }))
       .sort((a, b) => a.end.localeCompare(b.end))
     await render()

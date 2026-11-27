@@ -8,6 +8,7 @@ import { projectsApi, tasksApi, teamsApi } from '@/api'
 import type { ProjectItem } from '@/api/projects'
 import type { TaskItem, TaskPriority, TaskStatus } from '@/api/tasks'
 import type { TeamMemberItem } from '@/api/teams'
+import { fetchAllTasks, isTaskOverdue } from '@/utils/overview'
 
 /** 看板三列的元信息 */
 const COLUMNS: { key: TaskStatus; label: string; type: 'info' | 'warning' | 'success' }[] = [
@@ -17,11 +18,12 @@ const COLUMNS: { key: TaskStatus; label: string; type: 'info' | 'warning' | 'suc
 ]
 
 /** 优先级中文名与配色 */
-const PRIORITY_META: Record<TaskPriority, { label: string; type: 'danger' | 'warning' | 'info' }> = {
-  high: { label: '高', type: 'danger' },
-  medium: { label: '中', type: 'warning' },
-  low: { label: '低', type: 'info' }
-}
+const PRIORITY_META: Record<TaskPriority, { label: string; type: 'danger' | 'warning' | 'info' }> =
+  {
+    high: { label: '高', type: 'danger' },
+    medium: { label: '中', type: 'warning' },
+    low: { label: '低', type: 'info' }
+  }
 
 // ---------------------------------------------------------------- 数据
 
@@ -33,9 +35,7 @@ const teamMembers = ref<TeamMemberItem[]>([])
 const loading = ref(false)
 const mineOnly = ref(false)
 
-const currentProject = computed(() =>
-  projects.value.find((p) => p.id === currentProjectId.value)
-)
+const currentProject = computed(() => projects.value.find((p) => p.id === currentProjectId.value))
 
 /**
  * 按列分组的任务（**可写**，供 vuedraggable 双向绑定）。
@@ -66,7 +66,7 @@ async function loadProjects(preferredProjectId?: string): Promise<void> {
   const result = await projectsApi.fetchProjects({ page: 1, size: 100 })
   projects.value = result.list
   if (preferredProjectId) {
-    if (!projects.value.some(project => project.id === preferredProjectId))
+    if (!projects.value.some((project) => project.id === preferredProjectId))
       projects.value.push(await projectsApi.fetchProject(preferredProjectId))
     currentProjectId.value = preferredProjectId
     return
@@ -84,14 +84,12 @@ async function loadTasks(): Promise<void> {
   }
   loading.value = true
   try {
-    const result = await tasksApi.fetchTasks({
+    const list = await fetchAllTasks({
       projectId: currentProjectId.value,
-      mine: mineOnly.value ? true : undefined,
-      page: 1,
-      size: 100
+      mine: mineOnly.value ? true : undefined
     })
-    tasks.value = result.list
-    columns.value = groupTasks(result.list)
+    tasks.value = list
+    columns.value = groupTasks(list)
   } finally {
     loading.value = false
   }
@@ -153,10 +151,7 @@ interface DragChangeEvent {
  *   - `removed` 本列拖出到别的列 → 交给目标列的 `added` 处理，这里不管；
  *   - `moved`   本列内换位 → 只持久化顺序。
  */
-async function handleColumnChange(
-  status: TaskStatus,
-  event: DragChangeEvent
-): Promise<void> {
+async function handleColumnChange(status: TaskStatus, event: DragChangeEvent): Promise<void> {
   // 跨列拖入：先改状态（后端在此写 task_done 埋点），再持久化顺序
   if (event.added) {
     const moved = event.added.element
@@ -353,12 +348,6 @@ async function submitComment(): Promise<void> {
   }
 }
 
-/** 是否已逾期：截止日期早于今天且未完成 */
-function isOverdue(task: TaskItem): boolean {
-  if (!task.dueDate || task.status === 'done') return false
-  return task.dueDate < new Date().toISOString().slice(0, 10)
-}
-
 watch(currentProjectId, () => {
   void loadTasks()
   void loadMembers()
@@ -394,7 +383,12 @@ onMounted(async () => {
           <span v-if="currentProject" class="project-meta">
             {{ currentProject.taskDone }} / {{ currentProject.taskTotal }} 已完成
           </span>
-          <el-button type="primary" class="toolbar-primary" :disabled="!currentProjectId" @click="openCreate()">
+          <el-button
+            type="primary"
+            class="toolbar-primary"
+            :disabled="!currentProjectId"
+            @click="openCreate()"
+          >
             新建任务
           </el-button>
         </div>
@@ -431,27 +425,42 @@ onMounted(async () => {
               <div class="task-card" @click="openComments(element)">
                 <div class="task-card-head">
                   <span class="task-title">{{ element.title }}</span>
-                  <el-tag :type="PRIORITY_META[element.priority as TaskPriority]?.type ?? 'info'" size="small">
+                  <el-tag
+                    :type="PRIORITY_META[element.priority as TaskPriority]?.type ?? 'info'"
+                    size="small"
+                  >
                     {{ PRIORITY_META[element.priority as TaskPriority]?.label ?? element.priority }}
                   </el-tag>
                 </div>
                 <div class="task-card-meta">
-                  <span v-if="element.assigneeName" class="task-assignee">@{{ element.assigneeName }}</span>
+                  <span v-if="element.assigneeName" class="task-assignee">
+                    @{{ element.assigneeName }}
+                  </span>
                   <span v-else class="task-assignee task-unassigned">待认领</span>
-                  <span v-if="element.dueDate" class="task-due" :class="{ 'task-overdue': isOverdue(element) }">
+                  <span
+                    v-if="element.dueDate"
+                    class="task-due"
+                    :class="{ 'task-overdue': isTaskOverdue(element) }"
+                  >
                     {{ element.dueDate }}
                   </span>
                 </div>
                 <div class="task-card-actions">
                   <el-button link type="primary" @click.stop="openEdit(element)">编辑</el-button>
-                  <el-button link type="primary" @click.stop="openComments(element)">评论</el-button>
+                  <el-button link type="primary" @click.stop="openComments(element)">
+                    评论
+                  </el-button>
                   <el-button link type="danger" @click.stop="handleDelete(element)">删除</el-button>
                 </div>
               </div>
             </template>
           </draggable>
 
-          <el-empty v-if="columns[column.key].length === 0" description="暂无任务" :image-size="50" />
+          <el-empty
+            v-if="columns[column.key].length === 0"
+            description="暂无任务"
+            :image-size="50"
+          />
         </div>
       </div>
     </el-card>
@@ -463,7 +472,13 @@ onMounted(async () => {
           <el-input v-model="form.title" maxlength="200" placeholder="如：完成文献综述初稿" />
         </el-form-item>
         <el-form-item label="负责人">
-          <el-select v-model="form.assigneeId" placeholder="待认领" clearable class="full-width" filterable>
+          <el-select
+            v-model="form.assigneeId"
+            placeholder="待认领"
+            clearable
+            class="full-width"
+            filterable
+          >
             <el-option
               v-for="member in teamMembers"
               :key="member.userId"
@@ -480,7 +495,13 @@ onMounted(async () => {
           </el-radio-group>
         </el-form-item>
         <el-form-item label="截止日期">
-          <el-date-picker v-model="form.dueDate" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" class="full-width" />
+          <el-date-picker
+            v-model="form.dueDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="选择日期"
+            class="full-width"
+          />
         </el-form-item>
         <el-form-item v-if="!editingId" label="初始状态">
           <el-radio-group v-model="form.status">
@@ -489,7 +510,13 @@ onMounted(async () => {
           </el-radio-group>
         </el-form-item>
         <el-form-item label="描述">
-          <el-input v-model="form.description" type="textarea" :rows="3" maxlength="2000" placeholder="选填" />
+          <el-input
+            v-model="form.description"
+            type="textarea"
+            :rows="3"
+            maxlength="2000"
+            placeholder="选填"
+          />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -499,9 +526,17 @@ onMounted(async () => {
     </el-dialog>
 
     <!-- 评论抽屉 -->
-    <el-drawer v-model="commentVisible" :title="`任务评论 · ${commentTask?.title ?? ''}`" size="480px">
+    <el-drawer
+      v-model="commentVisible"
+      :title="`任务评论 · ${commentTask?.title ?? ''}`"
+      size="480px"
+    >
       <div v-loading="commentLoading" class="comment-list">
-        <el-empty v-if="comments.length === 0 && !commentLoading" description="还没有评论" :image-size="70" />
+        <el-empty
+          v-if="comments.length === 0 && !commentLoading"
+          description="还没有评论"
+          :image-size="70"
+        />
         <div v-for="comment in comments" :key="comment.id" class="comment-item">
           <div class="comment-head">
             <span class="comment-author">{{ comment.senderName }}</span>

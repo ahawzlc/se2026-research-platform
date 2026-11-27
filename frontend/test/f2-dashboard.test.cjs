@@ -1,59 +1,13 @@
-/** 工作台真实 SFC setup 回归；网络为替身，不计浏览器验收。 */
-/* global require, __dirname */
-/* eslint-disable @typescript-eslint/no-require-imports -- Node 原生测试编译 Vue SFC */
-const { test, mock } = require('node:test')
+/** F-2 工作台真实 SFC 回归；共享 F-3 的 API 边界沙箱。 */
+/* global require */
+/* eslint-disable @typescript-eslint/no-require-imports -- Node 原生测试 */
+const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const fs = require('node:fs')
-const path = require('node:path')
-const vm = require('node:vm')
-const vue = require('vue')
-const { parse, compileScript } = require('vue/compiler-sfc')
-const ts = require('typescript')
-
-const filename = path.resolve(__dirname, '../src/views/DashboardView.vue')
-const { descriptor } = parse(fs.readFileSync(filename, 'utf8'), { filename })
-const compiled = ts.transpileModule(compileScript(descriptor, { id: 'f2-dashboard' }).content, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
-}).outputText
+const { mountDashboard: mount } = require('./helpers/f3-harness.cjs')
 
 function meeting(id, hours) {
   const date = new Date(Date.now() + hours * 3_600_000 + 8 * 3_600_000)
   return { id, title: id, heldAt: date.toISOString().slice(0, 19).replace('T', ' ') }
-}
-
-function mount(rows, options = {}) {
-  let mounted
-  const fetchMeetings = mock.fn(
-    options.fetchMeetings ??
-      (async ({ page, size }) => ({
-        list: rows.slice((page - 1) * size, page * size),
-        total: rows.length
-      }))
-  )
-  const exports = {}
-  const scope = vue.effectScope()
-  vm.runInNewContext(
-    compiled,
-    {
-      exports,
-      require(name) {
-        if (name === 'vue')
-          return {
-            ...vue,
-            onMounted: (callback) => {
-              mounted = callback
-            }
-          }
-        if (name === '@/api') return { meetingsApi: { fetchMeetings } }
-        if (name === '@/utils/overview')
-          return { loadOverview: async () => ({ overdueTasks: [], overdueMilestones: [] }) }
-        throw new Error(`未声明的测试依赖：${name}`)
-      }
-    },
-    { filename }
-  )
-  const state = scope.run(() => exports.default.setup({}, { expose() {} }))
-  return { state, fetchMeetings, start: () => mounted(), stop: () => scope.stop() }
 }
 
 test('107场未来会议按接口倒序返回，工作台仍展示最近8场', async (t) => {
