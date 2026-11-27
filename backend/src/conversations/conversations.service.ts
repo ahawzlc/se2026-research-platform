@@ -6,17 +6,20 @@ import { formatDateTime, toIdString } from '../common/datetime';
 import {
   listUserTeamIds,
   parseId,
+  requireId,
   requireTeamMembership,
 } from '../common/team-access';
 import { areFriends } from '../common/friendship-access';
+import { isMeetingEnded } from '../common/meeting-status';
 import type {
   CreateGroupConversationDto,
+  CreateMeetingConversationDto,
   CreatePrivateConversationDto,
 } from './dto/conversation.dto';
 import type { ListConversationsQueryDto } from './dto/conversation-query.dto';
 
 /** 会话类型（docs/02 conversation.type） */
-export type ConversationType = 'comment' | 'group' | 'private';
+export type ConversationType = 'comment' | 'group' | 'private' | 'meeting';
 
 /** 对外暴露的消息条目 */
 export interface MessageItem {
@@ -26,7 +29,18 @@ export interface MessageItem {
   senderName: string;
   content: string;
   msgType: string;
+  /** 附件（msgType=file 时非空）：文件名、URL、大小、MIME */
+  file?: FileAttachmentItem;
   createdAt: string;
+}
+
+/** 消息附件信息（msgType=file 时挂在消息上） */
+export interface FileAttachmentItem {
+  id: string;
+  originalName: string;
+  url: string;
+  size: string;
+  mimeType: string;
 }
 
 /** 会话列表条目（含最后一条消息与未读数） */
@@ -137,11 +151,50 @@ export class ConversationsService {
   ): Promise<MessageItem[]> {
     const rows = await this.prisma.message.findMany({
       where: { conversationId, deleted: 0 },
-      include: { sender: { select: { username: true, nickname: true } } },
+      include: {
+        sender: { select: { username: true, nickname: true } },
+        file: {
+          select: {
+            id: true,
+            originalName: true,
+            url: true,
+            size: true,
+            mimeType: true,
+            deleted: true,
+          },
+        },
+      },
       orderBy: { id: 'desc' },
       take: limit,
     });
-    return rows.reverse().map((row) => ({
+    return rows.reverse().map((row) => this.toMessageItem(row));
+  }
+
+  /**
+   * 消息条目映射：把附件信息带出去。
+   *
+   * 附件被逻辑删除时（file.deleted=1）外键会被置空（ON DELETE SET NULL 只管物理删除，
+   * 逻辑删除是软删行，file_id 仍指向该行），故这里显式判断 deleted：
+   * deleted 的附件不返回 file 字段，前端降级为纯文本展示，不给死链。
+   */
+  private toMessageItem(row: {
+    id: bigint;
+    conversationId: bigint;
+    senderId: bigint;
+    content: string | null;
+    msgType: string;
+    createdAt: Date;
+    sender: { username: string; nickname: string | null };
+    file?: {
+      id: bigint;
+      originalName: string;
+      url: string | null;
+      size: bigint;
+      mimeType: string | null;
+      deleted: number;
+    } | null;
+  }): MessageItem {
+    const item: MessageItem = {
       id: toIdString(row.id),
       conversationId: toIdString(row.conversationId),
       senderId: toIdString(row.senderId),
@@ -149,7 +202,17 @@ export class ConversationsService {
       content: row.content ?? '',
       msgType: row.msgType,
       createdAt: formatDateTime(row.createdAt),
-    }));
+    };
+    if (row.file && row.file.deleted === 0) {
+      item.file = {
+        id: toIdString(row.file.id),
+        originalName: row.file.originalName,
+        url: row.file.url ?? '',
+        size: row.file.size.toString(),
+        mimeType: row.file.mimeType ?? '',
+      };
+    }
+    return item;
   }
 
   /** 向会话发送一条消息（B-3 用；C-5 用 sendConversationMessage 替代） */
@@ -251,6 +314,88 @@ export class ConversationsService {
     await this.ensureMember(conversationId, BigInt(userId));
 
     return this.detailConversation(userId, conversationId.toString());
+  }
+
+  /**
+   * 创建/获取会议讨论区（线③ 卡 F-1）。
+   *
+   * 会话类型用 G-0 定稿的 `meeting`，refType/refId 指向会议——**表结构不因本卡改动**。
+   *
+   * 权限：会议挂在项目下，故沿用会议那条链的校验——必须是**项目所属团队的成员**
+   * （红线 9：权限判断在 service 层做，不信 JWT roles）。
+   * 跨组用户拿别人的会议 id 来开讨论区 → 403/404。
+   *
+   * 参会人 ≠ 会话成员（重要取舍）：
+   * 讨论区的会话成员**按需加入**（谁发言谁是成员），与项目讨论区「各自进入才出现」
+   *   的既有语义一致；会议改参会人时**不同步**讨论区成员，
+   *   否则每次改参会人都要动会话成员表，且已归档的会议会被追溯修改。
+   *   可见性由「项目团队成员」保证，不依赖会话成员。
+   */
+  async ensureMeetingConversation(
+    userId: string,
+    dto: CreateMeetingConversationDto,
+  ): Promise<ConversationItem> {
+    const meetingId = parseId(dto.meetingId);
+    if (meetingId === null) {
+      throw BizException.notFound('会议不存在');
+    }
+    const meeting = await this.prisma.meeting.findFirst({
+      where: { id: meetingId, deleted: 0 },
+      include: {
+        project: {
+          select: { id: true, name: true, teamId: true, deleted: true },
+        },
+      },
+    });
+    if (!meeting || meeting.project.deleted !== 0) {
+      throw BizException.notFound('会议不存在');
+    }
+    await requireTeamMembership(this.prisma, meeting.project.teamId, userId);
+
+    const conversationId = await this.ensureAnchorConversation(
+      'meeting',
+      'meeting',
+      meeting.id,
+      `会议「${meeting.title}」讨论区`,
+    );
+    await this.ensureMember(conversationId, BigInt(userId));
+
+    return this.detailConversation(userId, conversationId.toString());
+  }
+
+  /**
+   * 会议讨论区是否只读（会议已结束 → 只读）。
+   *
+   * 口径（2026-11-27 牵头人确认）：
+   *   - **能看不能发**：历史消息作为会议存档可读，新参会人也能看；
+   *   - 任何人（含新参会人）都不能再发言；
+   *   - `unscheduled`（未填开始时间）**不算已结束**，讨论区照常可用。
+   *
+   * @returns 已结束 → true（只读）；其余 → false（可发言）
+   */
+  async isMeetingDiscussionReadOnly(
+    userId: string,
+    idParam: string,
+  ): Promise<boolean> {
+    const conversationId = await this.requireMemberConversation(
+      userId,
+      idParam,
+    );
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { id: conversationId, deleted: 0, type: 'meeting' },
+      select: { refId: true },
+    });
+    if (!conversation || conversation.refId === null) {
+      return false;
+    }
+    const meeting = await this.prisma.meeting.findFirst({
+      where: { id: conversation.refId, deleted: 0 },
+      select: { heldAt: true },
+    });
+    if (!meeting) {
+      return false;
+    }
+    return isMeetingEnded(meeting.heldAt);
   }
 
   /**
@@ -430,11 +575,15 @@ export class ConversationsService {
    * **非好友限流（线③ 卡 E-3）**：private 会话中，若双方不是好友，
    * 则每个方向最多发 1 条（首次打招呼模式）；成为好友后解除限制。
    * 判定依据是「该方向已发出的消息条数」，与群聊/讨论区无关。
+   *
+   * **文件消息（线③ 收尾）**：带 `fileId` 时消息类型为 `file`，
+   * 附件本体落在 `file` 表，content 存一句说明。
    */
   async sendConversationMessage(
     userId: string,
     idParam: string,
     content: string,
+    fileIdParam?: string,
   ): Promise<MessageItem> {
     const conversationId = await this.requireMemberConversation(
       userId,
@@ -444,10 +593,33 @@ export class ConversationsService {
 
     await this.assertMessageAllowed(conversationId, senderId);
 
+    // 附件校验：只能挂自己上传的、且未被逻辑删除的文件
+    const fileId = fileIdParam
+      ? await this.resolveOwnFile(fileIdParam, senderId)
+      : null;
+
     const message = await this.prisma.$transaction(async (tx) => {
       const created = await tx.message.create({
-        data: { conversationId, senderId, content, msgType: 'text' },
-        include: { sender: { select: { username: true, nickname: true } } },
+        data: {
+          conversationId,
+          senderId,
+          content,
+          msgType: fileId ? 'file' : 'text',
+          ...(fileId ? { fileId } : {}),
+        },
+        include: {
+          sender: { select: { username: true, nickname: true } },
+          file: {
+            select: {
+              id: true,
+              originalName: true,
+              url: true,
+              size: true,
+              mimeType: true,
+              deleted: true,
+            },
+          },
+        },
       });
 
       // 刷新会话的 updatedAt，让列表按最近活动排序
@@ -465,24 +637,46 @@ export class ConversationsService {
       return created;
     });
 
-    return {
-      id: toIdString(message.id),
-      conversationId: toIdString(message.conversationId),
-      senderId: toIdString(message.senderId),
-      senderName: message.sender.nickname || message.sender.username,
-      content: message.content ?? '',
-      msgType: message.msgType,
-      createdAt: formatDateTime(message.createdAt),
-    };
+    return this.toMessageItem(message);
   }
 
   /**
-   * 非好友发言限制检查（线③ 卡 E-3）。
+   * 校验消息附件：文件必须存在、未被逻辑删除，且**上传人是自己**。
    *
-   * 规则（2026-11-24 牵头人确认，docs/12 决策点 3）：
-   *   - private 会话中，若发送方与对方**既不是好友、也不在同一个课题组**，
-   *     则该方向已发出的消息数必须 < 1（即最多 1 条）；
-   *   - **同组或好友都不受限**。
+   * 为什么限制上传人：
+   * `file` 表的下载接口是 `@Public()`（不做登录校验，URL 不可枚举但一旦泄露即可访问），
+   * 若允许引用他人上传的文件，等于把「猜不到 URL」变成「可主动引用」，
+   * 附件的来源可信度就没了。故只允许挂自己的文件。
+   */
+  private async resolveOwnFile(
+    fileIdParam: string,
+    senderId: bigint,
+  ): Promise<bigint> {
+    const fileId = requireId(fileIdParam, 'fileId 非法');
+    const file = await this.prisma.file.findFirst({
+      where: { id: fileId, deleted: 0 },
+      select: { id: true, uploaderId: true },
+    });
+    if (!file) {
+      throw BizException.param('附件不存在');
+    }
+    if (file.uploaderId !== senderId) {
+      throw BizException.forbidden('只能发送自己上传的附件');
+    }
+    return file.id;
+  }
+
+  /**
+   * 发言前的两道限制检查。
+   *
+   * ① **会议讨论区只读**（线③ 卡 F-1）：
+   *   会议已结束（按 `heldAt + 120min` 估算）后，讨论区只读——
+   *   历史消息作为会议存档可读，但谁都不能再发言（含新参会人）。
+   *   未排期（unscheduled）不算结束，照常可发。
+   *
+   * ② **非好友限流**（线③ 卡 E-3）：
+   *   private 会话中，若双方既不是好友、也不在同一个课题组，
+   *   则该方向已发出的消息数必须 < 1（即最多 1 条）；同组或好友都不受限。
    *
    * 为什么必须豁免同组（缺陷 A2）：
    * `friendship` 是本卡新增的表，部署前就存在的私信会话里双方都不是好友。
@@ -490,7 +684,7 @@ export class ConversationsService {
    * 那个会话就会被永久冻结（发第二条即 403），而用户没有别的入口——
    * 这是上线即炸的缺陷。同组豁免让存量会话恢复正常。
    *
-   * 非 private 会话（group / comment / meeting）不受此限制。
+   * 非 private 会话（group / comment / meeting）不受非好友限流。
    */
   private async assertMessageAllowed(
     conversationId: bigint,
@@ -498,10 +692,25 @@ export class ConversationsService {
   ): Promise<void> {
     const conversation = await this.prisma.conversation.findFirst({
       where: { id: conversationId, deleted: 0 },
-      select: { type: true },
+      select: { type: true, refId: true },
     });
-    if (!conversation || conversation.type !== 'private') {
-      return; // 非私信不受限制
+    if (!conversation) {
+      return; // 异常数据，交由上层 404
+    }
+
+    // ① 会议讨论区只读
+    if (conversation.type === 'meeting' && conversation.refId !== null) {
+      const meeting = await this.prisma.meeting.findFirst({
+        where: { id: conversation.refId, deleted: 0 },
+        select: { heldAt: true },
+      });
+      if (meeting && isMeetingEnded(meeting.heldAt)) {
+        throw BizException.forbidden('会议已结束，讨论区只读，不能再发言');
+      }
+    }
+
+    if (conversation.type !== 'private') {
+      return; // 非私信不受非好友限流
     }
 
     const peerMember = await this.prisma.conversationMember.findFirst({

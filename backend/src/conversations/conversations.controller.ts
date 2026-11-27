@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ConversationsService } from './conversations.service';
 import {
   CreateGroupConversationDto,
+  CreateMeetingConversationDto,
   CreatePrivateConversationDto,
   ListMessagesQueryDto,
   OpenPrivateConversationByUidDto,
@@ -34,6 +35,33 @@ export class ConversationsController {
     @Body() dto: CreateGroupConversationDto,
   ) {
     return this.conversations.ensureGroupConversation(user.userId, dto);
+  }
+
+  @Post('meeting')
+  @ApiOperation({
+    summary: '创建/获取会议讨论区（线③ 卡 F-1；会议已结束后讨论区只读）',
+  })
+  ensureMeeting(
+    @CurrentUser() user: CurrentUserPayload,
+    @Body() dto: CreateMeetingConversationDto,
+  ) {
+    return this.conversations.ensureMeetingConversation(user.userId, dto);
+  }
+
+  @Get('meeting/:id/readonly')
+  @ApiOperation({
+    summary:
+      '会议讨论区是否只读（线③ 卡 F-1；会议已结束 → true，前端据此禁用输入框）',
+  })
+  async meetingReadOnly(
+    @CurrentUser() user: CurrentUserPayload,
+    @Param('id') id: string,
+  ) {
+    const readOnly = await this.conversations.isMeetingDiscussionReadOnly(
+      user.userId,
+      id,
+    );
+    return { readOnly };
   }
 
   @Post('private')
@@ -90,7 +118,8 @@ export class ConversationsController {
 
   @Post(':id/messages')
   @ApiOperation({
-    summary: '发送消息（零埋点；消息不计入参与度）',
+    summary:
+      '发送消息（零埋点；消息不计入参与度；带 fileId 时为文件消息，线③ 收尾）',
   })
   send(
     @CurrentUser() user: CurrentUserPayload,
@@ -101,6 +130,7 @@ export class ConversationsController {
       user.userId,
       id,
       dto.content,
+      dto.fileId,
     );
   }
 

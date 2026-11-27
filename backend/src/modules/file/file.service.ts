@@ -8,6 +8,29 @@ import { BizException } from '../../common/result';
 import { formatDate, formatDateTime, toIdString } from '../../common/datetime';
 import { DEFAULT_ALLOWED_EXT, DEFAULT_MAX_SIZE_MB } from './file.constants';
 
+/**
+ * 纠正上传文件名的字符编码。
+ *
+ * **为什么需要**：浏览器按 UTF-8 发送 multipart 的 filename，
+ * 但 multer/busboy 默认用 latin1 解析 header，
+ * 于是中文名会被解成乱码（"纪要.txt" → "çºªè¦.txt"）。
+ * 这不只是显示难看——**扩展名白名单校验会失效**：
+ * `extname()` 取到的后缀也跟着乱，要么全拒、要么误判。
+ *
+ * 做法：把 latin1 串**按字节**还原成 UTF-8。
+ * 若还原结果含替换字符（说明原串本就不是「UTF-8 被误读成 latin1」），保持原样。
+ */
+export function decodeOriginalName(name: string): string {
+  if (!name) return name;
+  // 纯 ASCII 之类不含高位字节的名字无需处理
+  if (!/[\u00c0-\u00ff]/.test(name)) {
+    return name;
+  }
+  const bytes = Buffer.from(name, 'latin1');
+  const decoded = bytes.toString('utf8');
+  return decoded.includes('\ufffd') ? name : decoded;
+}
+
 /** 上传成功后返回给前端的文件信息（与 frontend/src/api/types.ts 的 FileItem 对齐） */
 export interface FileItem {
   id: string;
@@ -81,11 +104,13 @@ export class FileService {
         `文件大小超过 ${this.maxSizeBytes / 1024 / 1024}MB 限制`,
       );
     }
-    if (!this.isAllowedExt(file.originalname)) {
+    // 中文文件名先纠正编码（见 decodeOriginalName）
+    const originalName = decodeOriginalName(file.originalname);
+    if (!this.isAllowedExt(originalName)) {
       throw BizException.param('不支持的文件类型');
     }
 
-    const ext = extname(file.originalname).toLowerCase();
+    const ext = extname(originalName).toLowerCase();
     const filename = `${randomUUID()}${ext}`;
     const dateDir = formatDate(new Date()).replace(/-/g, '/');
     const storedPath = `${dateDir}/${filename}`;
@@ -98,7 +123,7 @@ export class FileService {
     const record = await this.prisma.file.create({
       data: {
         uploaderId: BigInt(uploaderId),
-        originalName: file.originalname,
+        originalName,
         storedPath,
         url: `${this.urlPrefix}/${storedPath}`,
         size: BigInt(file.size),
