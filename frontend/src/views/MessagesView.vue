@@ -1,17 +1,19 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { authApi, conversationsApi, projectsApi, teamsApi } from '@/api'
+import { authApi, conversationsApi, fileApi, projectsApi, teamsApi } from '@/api'
 import type { ConversationItem, ConversationType, MessageItem } from '@/api/conversations'
 import type { ProjectItem } from '@/api/projects'
 import type { TeamMemberItem } from '@/api/teams'
 import { useUserStore } from '@/store/user'
+import { formatFileSize } from '@/utils/display'
 
 /** 会话类型中文名与标签配色（comment 为 B-3 任务评论复用的锚定会话，零未读） */
-const TYPE_META: Record<ConversationType, { label: string; tag: 'info' | 'success' | 'warning' }> = {
-  comment: { label: '任务评论', tag: 'info' },
-  group: { label: '项目讨论区', tag: 'success' },
-  private: { label: '私信', tag: 'warning' }
+const TYPE_META: Record<ConversationType, { label: string; tag: 'info' | 'success' | 'warning' | 'danger' }> = {
+    comment: { label: '任务评论', tag: 'info' },
+    group: { label: '项目讨论区', tag: 'success' },
+    private: { label: '私信', tag: 'warning' },
+    meeting: { label: '会议讨论区', tag: 'danger' }
 }
 
 /** 未读轮询间隔：SRS 口径 30 秒（docs/01 已废弃旧 3–5 秒） */
@@ -94,9 +96,16 @@ async function handleSend(): Promise<void> {
   if (!content || !activeId.value || sending.value) return
   sending.value = true
   try {
-    const message = await conversationsApi.sendMessage(activeId.value, content)
+    // 有附件时先传文件拿到 fileId，再带 fileId 发消息（两段式）
+    let fileId: string | undefined
+    if (pendingFile.value) {
+      const uploaded = await fileApi.uploadFile(pendingFile.value)
+      fileId = uploaded.id
+    }
+    const message = await conversationsApi.sendMessage(activeId.value, content, fileId)
     messages.value.push(message)
     draft.value = ''
+    pendingFile.value = undefined
     await scrollToBottom()
     // 同步左侧预览（消息零埋点，无需其他联动）
     const conv = conversations.value.find((c) => c.id === activeId.value)
@@ -109,6 +118,35 @@ async function handleSend(): Promise<void> {
   } finally {
     sending.value = false
   }
+}
+
+/**
+ * 待发送的附件（线③ 收尾）。
+ *
+ * 只在内存里暂存，**不上传即选中**——避免用户选了个文件又取消，
+ * 服务器上却留下一条没人引用的 file 记录（孤儿文件）。
+ * 真正的上传发生在点「发送」那一刻。
+ */
+const pendingFile = ref<File | undefined>()
+
+/** 上传组件实例：选中后立刻清空内部列表，才能重复选同一个文件 */
+const uploadRef = ref<{ clearFiles: () => void } | undefined>()
+
+/**
+ * 附件选择回调。
+ *
+ * `on-change` 在 auto-upload=false 时于「选中文件」时触发，
+ * 原始 File 对象在 `raw` 里（`uploadFile` 是 el-upload 的包装对象，不是浏览器 File）。
+ */
+function handleFileChange(uploadFile: { raw?: File }): void {
+    pendingFile.value = uploadFile.raw
+    // 清空内部列表：否则第二次选同一文件会被 limit 拦下
+    uploadRef.value?.clearFiles()
+}
+
+/** 移除待发送的附件 */
+function handleFileRemove(): void {
+    pendingFile.value = undefined
 }
 
 async function scrollToBottom(): Promise<void> {
@@ -341,11 +379,31 @@ onBeforeUnmount(() => {
             <div class="msg-bubble">
               <div v-if="msg.senderId !== myUserId" class="msg-sender">{{ msg.senderName }}</div>
               <div class="msg-content">{{ msg.content }}</div>
+              <!-- 文件消息（线③ 收尾）：附件卡片；附件被删除时后端不下发 file，降级为纯文本 -->
+              <a
+                v-if="msg.msgType === 'file' && msg.file"
+                class="msg-file"
+                :href="msg.file.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                :download="msg.file.originalName"
+              >
+                <span class="msg-file-icon" aria-hidden="true">📎</span>
+                <span class="msg-file-name">{{ msg.file.originalName }}</span>
+                <span class="msg-file-size">{{ formatFileSize(msg.file.size) }}</span>
+              </a>
               <div class="msg-time">{{ msg.createdAt }}</div>
             </div>
           </div>
         </div>
         <div class="msg-input">
+          <!-- 待发送的附件（线③ 收尾）：显示在输入框上方，点发送才真正上传 -->
+          <div v-if="pendingFile" class="msg-pending-file">
+            <span class="msg-file-icon" aria-hidden="true">📎</span>
+            <span class="msg-file-name">{{ pendingFile.name }}</span>
+            <span class="msg-file-size">{{ formatFileSize(pendingFile.size) }}</span>
+            <el-button link type="danger" @click="handleFileRemove">移除</el-button>
+          </div>
           <el-input
             v-model="draft"
             type="textarea"
@@ -354,6 +412,18 @@ onBeforeUnmount(() => {
             placeholder="输入消息，Enter 发送，Shift+Enter 换行"
             @keydown.enter.exact.prevent="handleSend"
           />
+          <el-upload
+            ref="uploadRef"
+            class="msg-upload"
+            :auto-upload="false"
+            :show-file-list="false"
+            :on-change="handleFileChange"
+          >
+            <el-button :disabled="!activeId">
+              <span aria-hidden="true">📎</span>
+              <span class="msg-upload-text">附件</span>
+            </el-button>
+          </el-upload>
           <el-button
             type="primary"
             :loading="sending"
@@ -604,6 +674,58 @@ onBeforeUnmount(() => {
   word-break: break-word;
 }
 
+/* 附件卡片（线③ 收尾） */
+.msg-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: #ffffff;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  color: #409eff;
+  text-decoration: none;
+  font-size: 13px;
+  max-width: 100%;
+}
+
+.msg-file:hover {
+  border-color: #409eff;
+}
+
+.msg-file-icon {
+  font-size: 14px;
+}
+
+.msg-file-name {
+  color: #303133;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.msg-file-size {
+  color: #909399;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* 待发送的附件（选中但还没上传） */
+.msg-pending-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.msg-pending-file .msg-file-name {
+  color: #303133;
+}
+
 .msg-time {
   margin-top: 2px;
   font-size: 11px;
@@ -617,6 +739,11 @@ onBeforeUnmount(() => {
   padding: 10px 12px;
   border-top: 1px solid #f0f0f0;
   align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.msg-upload-text {
+  margin-left: 4px;
 }
 
 .chat-empty {

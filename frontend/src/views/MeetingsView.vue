@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
-import { meetingsApi, projectsApi, teamsApi } from '@/api'
+import { conversationsApi, meetingsApi, projectsApi, teamsApi } from '@/api'
 import type { MeetingItem } from '@/api/meetings'
+import type { MessageItem } from '@/api/conversations'
 import type { ProjectItem } from '@/api/projects'
 import type { TeamMemberItem } from '@/api/teams'
 
@@ -91,6 +92,69 @@ const rules: FormRules = {
 const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detail = ref<MeetingItem | null>(null)
+
+// ---------------------------------------------------------------- 讨论区（F-1）
+
+/**
+ * 会议讨论区（线③ 卡 F-1）。
+ *
+ * 会话模型：`Conversation.type = meeting`，refType/refId 指向会议
+ * （G-0 已定稿的枚举值，本卡不改表结构）。
+ *
+ * 只读口径（2026-11-27 牵头人确认）：会议已结束后讨论区**能看不能发**——
+ * 历史消息作为会议存档可读，新参会人也能看，但任何人都不再能发言。
+ * 「未排期」（未填开始时间）不算结束，照常可发。
+ */
+const discussionConversationId = ref('')
+const discussionMessages = ref<MessageItem[]>([])
+const discussionLoading = ref(false)
+const discussionReadOnly = ref(false)
+const discussionDraft = ref('')
+const discussionSending = ref(false)
+const discussionScrollRef = ref<HTMLElement>()
+
+/** 打开会议详情后加载讨论区（失败不阻断详情展示） */
+async function loadDiscussion(meetingId: string): Promise<void> {
+  discussionMessages.value = []
+  discussionConversationId.value = ''
+  discussionReadOnly.value = false
+  discussionLoading.value = true
+  try {
+    const conv = await conversationsApi.ensureMeetingConversation(meetingId)
+    discussionConversationId.value = conv.id
+    discussionMessages.value = await conversationsApi.fetchMessages(conv.id, 200)
+    const ro = await conversationsApi.fetchMeetingDiscussionReadOnly(conv.id)
+    discussionReadOnly.value = ro.readOnly
+    await scrollDiscussionToBottom()
+  } catch {
+    // 请求拦截器已提示错误；讨论区是附加内容，失败不影响会议详情本身
+  } finally {
+    discussionLoading.value = false
+  }
+}
+
+async function scrollDiscussionToBottom(): Promise<void> {
+  await nextTick()
+  const el = discussionScrollRef.value
+  if (el) el.scrollTop = el.scrollHeight
+}
+
+async function sendDiscussionMessage(): Promise<void> {
+  const content = discussionDraft.value.trim()
+  if (!content || !discussionConversationId.value || discussionSending.value) return
+  if (discussionReadOnly.value) return
+  discussionSending.value = true
+  try {
+    const message = await conversationsApi.sendMessage(discussionConversationId.value, content)
+    discussionMessages.value.push(message)
+    discussionDraft.value = ''
+    await scrollDiscussionToBottom()
+  } catch {
+    // 提示由拦截器统一处理
+  } finally {
+    discussionSending.value = false
+  }
+}
 
 function dayKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
@@ -312,6 +376,8 @@ async function openDetail(row: Pick<MeetingItem, 'id'>): Promise<void> {
   try {
     const result = await meetingsApi.fetchMeeting(row.id)
     if (request === detailRequest) detail.value = result
+    // 讨论区与详情并行加载；失败不阻断详情展示
+    void loadDiscussion(row.id)
   } catch {
     // 请求拦截器已提示 403/404 等错误；不要留下空详情或上一次会议的内容。
     if (request === detailRequest) detailVisible.value = false
@@ -603,6 +669,61 @@ onMounted(async () => {
               <el-table-column prop="email" label="邮箱" min-width="200" />
             </el-table>
           </template>
+
+          <!-- 讨论区（线③ 卡 F-1） -->
+          <div class="discussion">
+            <p class="members-title">
+              讨论区
+              <el-tag v-if="discussionReadOnly" size="small" type="info" effect="plain">
+                会议已结束，只读
+              </el-tag>
+            </p>
+
+            <div
+              ref="discussionScrollRef"
+              v-loading="discussionLoading"
+              class="discussion-scroll"
+            >
+              <el-empty
+                v-if="discussionMessages.length === 0 && !discussionLoading"
+                description="还没有人发言"
+                :image-size="50"
+              />
+              <div
+                v-for="msg in discussionMessages"
+                :key="msg.id"
+                class="discussion-msg"
+              >
+                <span class="discussion-sender">{{ msg.senderName }}</span>
+                <span class="discussion-text">{{ msg.content }}</span>
+                <span class="discussion-time">{{ msg.createdAt }}</span>
+              </div>
+            </div>
+
+            <div class="discussion-input">
+              <el-input
+                v-model="discussionDraft"
+                type="textarea"
+                :rows="2"
+                maxlength="2000"
+                :disabled="discussionReadOnly"
+                :placeholder="
+                  discussionReadOnly
+                    ? '会议已结束，讨论区只读'
+                    : '在讨论区发言，Enter 发送，Shift+Enter 换行'
+                "
+                @keydown.enter.exact.prevent="sendDiscussionMessage"
+              />
+              <el-button
+                type="primary"
+                :loading="discussionSending"
+                :disabled="!discussionDraft.trim() || discussionReadOnly || !discussionConversationId"
+                @click="sendDiscussionMessage"
+              >
+                发送
+              </el-button>
+            </div>
+          </div>
         </template>
       </div>
     </el-dialog>
@@ -721,6 +842,56 @@ onMounted(async () => {
   margin: 0 0 8px;
   color: #606266;
   font-size: 13px;
+}
+
+/* 讨论区（线③ 卡 F-1） */
+.discussion {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.discussion-scroll {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 8px;
+  background: #fafafa;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+}
+
+.discussion-msg {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.discussion-sender {
+  color: #409eff;
+  flex-shrink: 0;
+}
+
+.discussion-text {
+  flex: 1;
+  color: #303133;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.discussion-time {
+  color: #c0c4cc;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.discussion-input {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  align-items: flex-end;
 }
 
 .content-text {

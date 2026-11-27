@@ -6,7 +6,10 @@
   "description": "校园科研项目协作与成果管理平台 —— 前端",
   "scripts": {
     "dev": "vite",
-    "test": "node --test test/*.test.cjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:legacy": "node --test test/*.test.cjs",
+    "test:all": "npm run test && npm run test:legacy",
     "typecheck": "vue-tsc --noEmit",
     "build": "vue-tsc --noEmit && vite build",
     "build:only": "vite build",
@@ -28,13 +31,16 @@
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.6.5",
     "@vitejs/plugin-vue": "^6.0.10",
+    "@vue/test-utils": "^2.6.0",
     "eslint": "^10.12.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-vue": "^10.11.1",
+    "jsdom": "^26.1.0",
     "prettier": "^3.9.10",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.71.2",
     "vite": "^8.3.4",
+    "vitest": "^3.2.7",
     "vue-tsc": "^3.3.13"
   }
 }
