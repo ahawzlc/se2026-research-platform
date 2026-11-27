@@ -7,7 +7,7 @@
  * 拦截器的回归测试沿用线② 的既有资产（test/request-interceptor.test.cjs，
  * Node 原生 runner），这里只补它没覆盖到的新行为。
  */
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { formatFileSize } from '@/utils/display'
 import {
   filterMyTasks,
@@ -72,12 +72,28 @@ function task(overrides: Partial<TaskItem> & { id: string }): TaskItem {
   } as TaskItem
 }
 
+/**
+ * 把「今天」固定在 2026-11-27（周五）。
+ *
+ * isTaskOverdue / isTaskDueSoon / isMilestoneOverdue 没有可注入的 now，读的是真实时钟，
+ * 而下面用例里的日期是写死的——不固定时钟的话，过了 2026-11-27 这些日期就不再成立，
+ * 整套用例会隔天变红（CI 每天都在跑）。
+ */
+function freezeToday(): void {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-27T10:00:00'))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+}
+
 describe('逾期判定（口径：截止日早于今天且未完成）', () => {
-  const now = new Date('2026-11-27T10:00:00')
+  freezeToday()
 
   it('今天的截止日不算逾期', () => {
     expect(isTaskOverdue(task({ id: '1', dueDate: '2026-11-27' }))).toBe(false)
-    void now
   })
 
   it('昨天截止且未完成 → 逾期', () => {
@@ -96,6 +112,8 @@ describe('逾期判定（口径：截止日早于今天且未完成）', () => {
 })
 
 describe('临期判定（今天起 3 天内）', () => {
+  freezeToday()
+
   it('今天到期 → 临期', () => {
     expect(isTaskDueSoon(task({ id: '1', dueDate: '2026-11-27' }))).toBe(true)
   })
@@ -114,6 +132,8 @@ describe('临期判定（今天起 3 天内）', () => {
 })
 
 describe('里程碑逾期', () => {
+  freezeToday()
+
   const milestone = (over: Partial<MilestoneItem>): MilestoneItem =>
     ({ status: 'todo', dueDate: '2026-11-26', ...over }) as MilestoneItem
 
