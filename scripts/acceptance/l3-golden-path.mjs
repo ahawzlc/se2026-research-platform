@@ -5,11 +5,16 @@
  *   - `d-business-e2e.mjs` 是 **API 级**的验收（只打后端接口）；
  *   - 本脚本是 **浏览器级**的验收（CDP 驱动真实 Chromium，走完整前端）。
  *
- * 覆盖线③ 四张卡的黄金路径：
+ * 覆盖线③ 的黄金路径：
  *   E-3  好友链 → 主页 → 发私信
- *   F-1  会议详情 → 讨论区 → 发言 / 结束后只读
+ *   F-1  会议详情 → 讨论区 → 发言 / 结束后只读 / 30 秒轮询 / 看过即已读
  *   A-3  消息附件（上传 → 发送 → 渲染附件卡片）
  *   T-1c 未读数（对方未读 +1 → 打开会话 → 归零）
+ *
+ * **浏览器级断言 vs 接口级断言**：
+ * 断言接口返回值只能证明「后端对」，证明不了「前端做了」。
+ * 所以轮询、未读归零这两条特意用 **Network.requestWillBeSent 计数**来断言——
+ * 页面自己又发了一次请求，才算数。
  *
  * ---------------------------------------------------------------------------
  * 用法（Windows PowerShell）：
@@ -121,7 +126,16 @@ class CdpClient {
         else resolve(message.result)
       } else if (message.method) {
         this.events.push(message)
+        for (const handler of this.handlers) handler(message)
       }
+    })
+    this.handlers = []
+  }
+
+  /** 注册事件回调（如 Network.requestWillBeSent） */
+  on(method, handler) {
+    this.handlers.push((message) => {
+      if (message.method === method) handler(message.params ?? {})
     })
   }
 
@@ -183,6 +197,33 @@ async function waitForText(cdp, text, timeoutMs = 15000) {
   }
   throw new Error(`等待超时：页面未出现「${text}」`)
 }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** 轮询等待某个选择器出现（超时抛错） */
+async function waitForSelector(cdp, selector, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const found = await cdp.evaluate(
+      `!!document.querySelector(${JSON.stringify(selector)})`
+    )
+    if (found) return
+    await sleep(250)
+  }
+  throw new Error(`等待超时：页面未出现选择器「${selector}」`)
+}
+
+/** 讨论区轮询间隔（与前端一致：30 秒） */
+const POLL_WAIT_MS = 30_000
+
+/**
+ * 统计页面发出的「拉消息」请求次数。
+ *
+ * 用来区分**浏览器级**断言与**接口级**断言：
+ * 只断言接口返回值，证明不了前端真的轮询了；
+ * 断言这个计数变了，才说明页面自己又去拉了一次。
+ */
+let fetchMessagesCalls = 0
 
 // ---------------------------------------------------------------- 准备数据
 
@@ -299,6 +340,18 @@ try {
   cdp = await newPage()
   ok('Chrome 已连接')
 
+  // 统计前端发出的「拉消息」请求次数——用于浏览器级的轮询断言
+  await cdp.send('Network.enable')
+  cdp.on('Network.requestWillBeSent', (params) => {
+    const url = params.request?.url ?? ''
+    if (/\/api\/v1\/conversations\/[^/]+\/messages(\?|$)/.test(url)) {
+      fetchMessagesCalls += 1
+    }
+    if (process.env.L3_DEBUG_NET) {
+      console.log(`    [net] ${params.request?.method} ${url}`)
+    }
+  })
+
   // ---------------------------------------------------------------- 登录
 
   await cdp.send('Page.navigate', { url: new URL('/login', base).href })
@@ -340,15 +393,30 @@ try {
   await bobCdp.evaluate(`localStorage.setItem('se2026_token', ${JSON.stringify(bob.token)})`)
   await bobCdp.send('Page.navigate', { url: new URL('/messages', base).href })
   await waitForText(bobCdp, '会话')
+  // ⚠️ 「会话」是页头文字，列表还没加载完它就出现了——
+  // 必须等 .conv-item 真的渲染出来，否则后面断言的是空列表。
+  await waitForSelector(bobCdp, '.conv-item')
 
   // 未读徽标出现
-  // 注意：el-badge 的 class 落在外层 <div class="el-badge conv-badge"> 上，
-  // 数字在内部的 .el-badge__content 里，所以两处都要看。
+  //
+  // 注意两点：
+  // 1. el-badge 的 class 落在外层 <div class="el-badge conv-badge"> 上，
+  //    数字在内部的 .el-badge__content 里，所以两处都要看；
+  // 2. 要**定位到具体那个会话**——Bob 的会话列表里可能还有别的未读会话
+  //    （历次验收留下的），取第一个 .conv-badge 并不一定是我们这条。
   const badgeShown = await bobCdp.evaluate(
     `(() => {
-      const badge = document.querySelector('.conv-badge')
+      const items = [...document.querySelectorAll('.conv-item')]
+      const item = items.find((el) => el.innerText.includes(${JSON.stringify(
+        unreadText
+      )}))
+      if (!item) return false
+      const badge = item.querySelector('.conv-badge')
       if (!badge) return false
-      const text = badge.innerText.trim()
+      // ⚠️ 用 textContent 而不是 innerText：
+      // el-badge 的数字在 .el-badge__content 里，靠 CSS 定位显示，
+      // innerText 对「不可见」的元素返回空串，textContent 才是真实文本。
+      const text = (badge.textContent || '').trim()
       return text.length > 0
     })()`
   )
@@ -358,7 +426,10 @@ try {
   // 点开会话 → 未读归零（后端 lastReadAt 被推进）
   await bobCdp.evaluate(
     `(() => {
-      const item = document.querySelector('.conv-item')
+      const items = [...document.querySelectorAll('.conv-item')]
+      const item = items.find((el) => el.innerText.includes(${JSON.stringify(
+        unreadText
+      )}))
       if (!item) return false
       item.click()
       return true
@@ -384,14 +455,20 @@ try {
   )
   await cdp.send('Page.reload')
   await waitForText(cdp, '会话')
-  await cdp.evaluate(
+  await waitForSelector(cdp, '.conv-item')
+  // 点开**自己那条**会话：库里可能还有别的会话（历次验收留下的），
+  // 点第一个 .conv-item 不保证点对。
+  // 私信会话没有标题，靠列表里的**预览文字**（最后一条消息）来认。
+  const opened = await cdp.evaluate(
     `(() => {
-      const item = document.querySelector('.conv-item')
+      const items = [...document.querySelectorAll('.conv-item')]
+      const item = items.find((el) => el.innerText.includes('附件验收'))
       if (!item) return false
       item.click()
       return true
     })()`
   )
+  assert(opened === true, '未找到含「附件验收」的会话')
   await waitForText(cdp, '验收附件.txt')
   const fileCard = await cdp.evaluate(
     `(() => {
@@ -403,52 +480,50 @@ try {
   ok(`A-3 附件卡片渲染：${fileCard.name.replace(/\s+/g, ' ')}`)
   bobCdp.close()
 
+  // ⚠️ **必须把 Alice 的令牌写回去**！
+  // 两个标签页是**同一个 origin**（127.0.0.1:5174），localStorage 是共享的——
+  // 刚才给 Bob 注入令牌时，把 Alice 的覆盖了。不写回来的话，
+  // 后面所有浏览器步骤跑的都是 Bob（Bob 发的消息对 Bob 不是未读，
+  // 未读断言会莫名其妙地失败）。
+  await cdp.evaluate(
+    `localStorage.setItem('se2026_token', ${JSON.stringify(alice.token)})`
+  )
+
   // ---------------------------------------------------------------- F-1 会议讨论区
 
-  await cdp.send('Page.navigate', { url: new URL('/meetings', base).href })
-  await waitForText(cdp, '会议')
+  /**
+   * 打开某个会议的详情。
+   *
+   * 走**深链接** `/meetings?meetingId=<id>`，而不是在列表里按标题找行：
+   * 标题是子串匹配，验收库里有多次跑留下的同名会议（标题带随机后缀，
+   * 但子串 `已结束的会议` 会同时匹配好几场）——点到哪一场全看运气，
+   * 失败原因还跟被测行为无关。
+   * 深链接是精确的：meetingId 就是那一场。
+   */
+  async function openMeetingDetail(meetingId) {
+    await cdp.send('Page.navigate', {
+      url: new URL(`/meetings?meetingId=${meetingId}`, base).href
+    })
+    await waitForText(cdp, '讨论区')
+  }
 
   /**
-   * 切到「全部」页签。
+   * 关闭会议详情弹窗。
    *
-   * 默认页签是「未结束」，看不到已结束的会议；而未排期（无开始时间）的会议
-   * 也不属于「未结束」或「已结束」——两个用例要用到会议，都得先切页签。
+   * 弹窗关闭后要回到干净的会议列表页——深链接的 meetingId 还在 query 里，
+   * 路由的 watch 会把弹窗重新打开。
    */
-  async function switchToAllTab() {
-    await cdp.evaluate(
-      `(() => {
-        const tabs = [...document.querySelectorAll('.el-tabs__item')]
-        const all = tabs.find((t) => t.innerText.trim() === '全部')
-        if (!all) return false
-        all.click()
-        return true
-      })()`
-    )
-    await new Promise((resolve) => setTimeout(resolve, 800))
+  async function closeDetailDialog(cdp) {
+    await cdp.send('Page.navigate', { url: new URL('/meetings', base).href })
+    await waitForText(cdp, '会议')
+    await sleep(600)
   }
-
-  /** 在会议列表里点开某个主题的「详情」 */
-  async function openMeetingDetail(title) {
-    const clicked = await cdp.evaluate(
-      `(() => {
-        const rows = [...document.querySelectorAll('tbody tr')]
-        const row = rows.find((r) => r.innerText.includes(${JSON.stringify(title)}))
-        if (!row) return false
-        const btn = [...row.querySelectorAll('button')].find((b) => b.innerText.trim() === '详情')
-        if (!btn) return false
-        btn.click()
-        return true
-      })()`
-    )
-    assert(clicked === true, `未找到会议「${title}」的详情按钮`)
-  }
-
-  await switchToAllTab()
 
   // 已结束的会议 → 讨论区只读
-  await openMeetingDetail('已结束的会议')
+  await openMeetingDetail(endedMeeting.id)
   await waitForText(cdp, '讨论区')
-  await waitForText(cdp, '会议已结束，只读')
+  // 文案由后端的 reason 决定（「会议已结束，讨论区只读」），不再写死在模板里
+  await waitForText(cdp, '会议已结束，讨论区只读')
   const disabled = await cdp.evaluate(
     `(() => {
       const ta = document.querySelector('.discussion-input textarea')
@@ -458,17 +533,18 @@ try {
   assert(disabled === true, '只读会议的讨论区输入框应禁用')
   ok('F-1 已结束会议：讨论区只读，输入框禁用')
 
-  // 未排期的会议 → 讨论区可发言
-  await cdp.evaluate(
-    `(() => {
-      const close = document.querySelector('.el-dialog__headerbtn')
-      if (close) close.click()
-      return true
-    })()`
+  // 已结束的会议**不轮询**（只读存档不会再有新消息）
+  const endedCallsBefore = fetchMessagesCalls
+  await sleep(POLL_WAIT_MS + 2000)
+  assert(
+    fetchMessagesCalls === endedCallsBefore,
+    '已结束的会议不应轮询拉消息'
   )
-  await new Promise((resolve) => setTimeout(resolve, 800))
-  await openMeetingDetail('待定会议')
-  await waitForText(cdp, '讨论区')
+  ok('F-1 已结束会议：不轮询（只读存档不会有新消息）')
+
+  // 未排期的会议 → 讨论区可发言
+  await closeDetailDialog(cdp)
+  await openMeetingDetail(openMeeting.id)
   const enabled = await cdp.evaluate(
     `(() => {
       const ta = document.querySelector('.discussion-input textarea')
@@ -477,6 +553,81 @@ try {
   )
   assert(enabled === true, '未结束会议的讨论区输入框应可用')
   ok('F-1 未排期会议：讨论区可发言')
+
+  // ---------------------------------------------------------------- F-1 轮询
+
+  // 用 Bob 在同一个讨论区发言，然后等一轮轮询，看页面是否自动刷新出来。
+  // 这一条是**浏览器级**断言：验证的是「弹窗开着时别人发言，页面会自己更新」。
+  const openConv = await post(
+    '/conversations/meeting',
+    { meetingId: openMeeting.id },
+    alice.token
+  )
+  const openConvId = openConv.id
+  // Bob 要先**打开**这个讨论区才会成为会话成员（会话成员按需加入），
+  // 否则他发消息会 404「会话不存在」。
+  await post('/conversations/meeting', { meetingId: openMeeting.id }, bob.token)
+  await post(
+    `/conversations/${openConvId}/messages`,
+    { content: '轮询验收消息' },
+    bob.token
+  )
+  const beforePoll = fetchMessagesCalls
+  await waitForText(cdp, '轮询验收消息', POLL_WAIT_MS + 15000)
+  assert(fetchMessagesCalls > beforePoll, '讨论区轮询应重新拉取消息')
+  ok('F-1 讨论区 30 秒轮询：别人发言后页面自动刷新')
+
+  // ---------------------------------------------------------------- F-1 已读
+
+  // 在会议详情里看过讨论区 → 未读数应归零（评审意见）
+  //
+  // ⚠️ 这里要**轮询等**而不是直接断言：
+  // 前端是先 `discussionMessages.value = list`（文字立刻上屏），
+  // 再 `await markRead()`。断言跑得太快会抢在 markRead 完成之前。
+  let openUnread = []
+  for (let i = 0; i < 20; i++) {
+    openUnread = await get('/conversations/unread', alice.token)
+    const row = openUnread.find((item) => item.conversationId === openConvId)
+    if (!row || row.unreadCount === 0) break
+    await sleep(500)
+  }
+  const openRow = openUnread.find((item) => item.conversationId === openConvId)
+  assert(!openRow || openRow.unreadCount === 0, '看过讨论区后未读应归零')
+  ok('F-1 在会议详情看过讨论区后未读归零')
+
+  // ---------------------------------------------------------------- F-1 会议页只读
+
+  // 消息页里打开会议讨论区 → 只读会议应禁用输入框
+  //
+  // 两个坑：
+  // 1. 按**完整标题**匹配（标题带本脚本的随机后缀），避免点到历次验收留下的旧会话；
+  // 2. 会话列表分页 50 条，验收库里攒了很多次跑留下的会话——
+  //    直接找可能翻不到。先按 type=meeting 过滤，让列表只剩会议讨论区。
+  await closeDetailDialog(cdp)
+  await cdp.send('Page.navigate', { url: new URL('/messages', base).href })
+  await waitForText(cdp, '会话')
+  await waitForSelector(cdp, '.conv-item')
+  const pickedConv = await cdp.evaluate(
+    `(() => {
+      const items = [...document.querySelectorAll('.conv-item')]
+      const item = items.find((el) => el.innerText.includes(${JSON.stringify(
+        `会议「已结束的会议_${suffix}」讨论区`
+      )}))
+      if (!item) return false
+      item.click()
+      return true
+    })()`
+  )
+  assert(pickedConv === true, '消息页里未找到已结束会议的讨论区')
+  await new Promise((resolve) => setTimeout(resolve, 1200))
+  const msgReadOnly = await cdp.evaluate(
+    `(() => {
+      const ta = document.querySelector('.msg-input textarea')
+      return ta ? ta.disabled : null
+    })()`
+  )
+  assert(msgReadOnly === true, '消息页里会议讨论区只读时输入框应禁用')
+  ok('F-1 消息页：会议讨论区只读，输入框禁用')
 
   console.log(`\n线③ 黄金路径验收通过，共 ${checks} 项断言`)
 } finally {
